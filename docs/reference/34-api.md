@@ -1,0 +1,624 @@
+# API reference
+
+Base path `/api/v1`. Every endpoint requires authentication unless noted.
+
+Authentication is the `access_token` httpOnly cookie, sent automatically by the browser
+through the same-origin proxy. A `Bearer` header is also accepted for non-browser clients.
+
+Interactive OpenAPI is served at `/docs` and `/redoc` — **disabled when
+`ENVIRONMENT=production`**.
+
+Errors are `{"detail": "..."}` with a conventional status code. Streaming endpoints are
+documented in the [SSE protocol](35-sse.md).
+
+---
+
+## Health
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `GET` | `/health` | No | Liveness. `{"status": "ok", "version": "..."}` |
+| `GET` | `/health/ready` | No | Readiness. `200` when database and Redis both answer, **`503`** otherwise with a per-check breakdown |
+| `GET` | `/metrics` | No | Prometheus text exposition. **Server only** — the desktop host does not serve it |
+
+All three are outside `/api/v1`.
+
+`/metrics` reports seven families on a private registry, so nothing the process happens to
+import can add a series to it. The desktop host still *records* these counters — what it
+does not do is expose them, since nothing scrapes a loopback socket:
+
+| Family | What it counts |
+|---|---|
+| `research_run_outcomes_total` | Terminal run outcomes, by outcome |
+| `research_run_cost_usd_total` | Spend |
+| `research_run_cost_confidence_total` | Whether a run's cost is a measured figure or an estimate |
+| `research_run_tokens_total` | Tokens, by direction |
+| `corpus_ingest_documents_total` | Documents ingested |
+| `corpus_ingest_bytes_total` | Bytes ingested |
+| `research_build_info` | Build identity, as a gauge |
+
+Every label comes from a closed table — an unknown value is mapped to a known one rather
+than minted — because an open label set is how a metrics endpoint becomes a cardinality
+incident. Terminal outcomes are observed where runs actually terminate (completion at the
+approval route, failure and cancellation at the persistence adapter) and always after the
+commit, so a metric can never claim an outcome the database did not keep.
+
+---
+
+## Authentication
+
+### `POST /auth/register`
+
+`201`. Rate-limited per IP (5/hour).
+
+```json
+{ "email": "you@example.com", "password": "at least 12 chars" }
+```
+
+Returns a **neutral message either way**, so the endpoint cannot be used to enumerate
+accounts. `422` if the password fails the policy.
+
+### `POST /auth/login`
+
+Sets the `access_token` (15 min, path `/`) and `refresh_token` (14 days, path
+`/api/v1/auth`) cookies, both httpOnly.
+
+Rate-limited per IP (20/min) and per account (5 failures / 15 min). `401` on bad
+credentials, `403` if the account is deactivated, `429` when limited.
+
+### `POST /auth/refresh`
+
+Reads the refresh cookie, **rotates both cookies**. Reuse of an already-rotated token
+revokes the whole family and returns `401` with both cookies cleared.
+
+### `POST /auth/logout`
+
+Revokes the refresh token server-side and clears both cookies.
+
+### `GET /auth/me`
+
+The current user. Never includes the stored provider key — only its provider, an
+`api_key_hint` like `…aB3d`, an optional `api_key_label` nickname, and when it was set.
+
+```json
+{
+  "id": "uuid", "email": "you@example.com", "is_active": true,
+  "created_at": "...", "display_name": null, "avatar_url": null,
+  "monthly_token_limit": 0,
+  "api_key_provider": null, "api_key_base_url": null,
+  "api_key_hint": null, "api_key_label": null, "api_key_set_at": null,
+  "connection_verdict": null,
+  "preferences": { "retrieval_k": null, "min_sources_per_task": null,
+                   "snippet_max_chars": null, "density": null,
+                   "prompt_overrides": null }
+}
+```
+
+### `PATCH /auth/me`
+
+Updates `display_name`, `avatar_url`, `monthly_token_limit`, or `preferences`. Only fields
+present in the body change.
+
+**`preferences` is merged, never replaced** — a request from one settings section carries
+only that section's fields, and overwriting would blank every other preference. Avatar URLs
+must be `http(s)`; they render in an `<img>`.
+
+`preferences.prompt_overrides` is merged **per role**: `{"planner": "…"}` sets one role and
+leaves the others alone, and `{"planner": null}` resets that role to its shipped prompt. Keys
+are the five roles only; a value must be non-empty text of at most 2,500 characters. An empty
+or whitespace-only string is refused rather than read as a reset. Both hosts validate with the
+same model and answer a refusal with an identical `422` body — FastAPI's own validation error,
+each entry located from `body` (for example `["body", "preferences", "prompt_overrides"]`).
+
+### `POST /auth/me/password`
+
+```json
+{ "current_password": "...", "new_password": "..." }
+```
+
+Requires the current password — a stolen session cookie alone must not lock the owner out.
+Revokes every refresh token for the account and re-issues for the caller. `403` if the
+current password is wrong, `422` if the new one is unchanged or fails the policy.
+
+### `PUT /auth/me/api-key`
+
+```json
+{ "provider": "anthropic", "api_key": "...", "api_base_url": null }
+```
+
+Providers: `google`, `anthropic`, `openai`, `openrouter`, `custom`. Stored encrypted; never
+returned.
+
+**Saving is testing.** After the key is committed it is probed against the provider, and the
+response carries a `connection_verdict` of `ok`, `degraded`, or `failed` — three states,
+because "the server rejected your key" needs a different fix from "nothing answered". A probe
+failure never blocks the save. For `custom` in production, `api_base_url` is SSRF-validated
+before storage.
+
+### `DELETE /auth/me/api-key`
+
+Removes the stored key; the deployment's server key applies again. Also clears
+`api_key_label` — a nickname describes a connection that no longer exists once the key
+is gone.
+
+### `PATCH /auth/me/api-key/label`
+
+```json
+{ "label": "OmniRoute" }
+```
+
+Renames the active connection. `404` if no key is stored — there is nothing to name.
+Deliberately separate from `PUT /me/api-key`: a nickname does not require re-proving
+the key, so this never re-probes the provider and never touches `connection_verdict`.
+A blank `label` clears the nickname back to the provider's catalog name. Web only —
+the desktop app keeps one keychain entry per provider rather than a single named
+connection to disambiguate.
+
+### `GET /auth/me/usage`
+
+Token and cost usage for the current month, the rolling 7 days, and the last session, plus
+`monthly_token_limit`, `limit_remaining` (`null` when unlimited) and `limit_reached`.
+
+---
+
+## Research runs
+
+The product's research surface. A run produces a structured record — a plan, sources,
+evidence, claims, claim→evidence links, contradictions, revisions, review decisions and an
+artifact — and the report is a rendering of it. See
+[the research record](../getting-started/19-research-record.md) for what each part means.
+
+### `POST /runs`
+
+`201`. Creates the run and, unless `dispatch` is `false`, starts it.
+
+```json
+{
+  "project_id": "uuid",
+  "question": "1 to 2000 characters",
+  "depth": "fast | balanced | comprehensive",
+  "corpus_mode": false,
+  "corpus_selection": null,
+  "offline": false,
+  "skip_plan_gate": true,
+  "topic_seeds": null,
+  "outline_template": null,
+  "model_routing": null,
+  "dispatch": true
+}
+```
+
+`{"run_id": "...", "status": "PENDING", "dispatched": true}`.
+
+**`corpus_selection`** makes the run corpus-only and limits it to the chosen files:
+`{"doc_keys": ["..."], "folder_ids": []}`, at most 5,000 of each. The selection is resolved
+**when the run is created**, to the current version of each file, and stored on the run. Every
+later step reads that stored list, so a file replaced, deleted or added afterwards never changes
+what the run may read. `corpus_mode: true` with no `corpus_selection` is the project's whole
+corpus, resolved and stored the same way. Refusals, all before the run exists:
+
+| Status | When |
+|---|---|
+| `422` | `corpus_selection` names nothing; the selection or the whole corpus has no readable document; or `corpus_mode` is sent as `false` beside a selection |
+| `404` | a file or folder is not in this project (the response does not say which) |
+
+A folder in `folder_ids` selects every document in it and in its subfolders, resolved at that moment: a file added to the folder later is not part of the run.
+
+**`offline: true`** asks for every model call to stay on this computer. It implies corpus-only
+research (the whole project corpus when no `corpus_selection` is given). It is a separate
+guarantee from `corpus_selection`, which limits where evidence comes from and says nothing
+about where model calls go. The run is created either way; if any role is routed to a cloud
+provider, or to an Ollama or custom endpoint that is not on this machine, the run fails before
+any model is called, with an error starting `offline_unavailable:` that names each role.
+
+**`skip_plan_gate` defaults to `true` here and the run form sends `false`.** The default
+keeps an un-updated script on the journey it already had; the product default is the design
+gate, and the form states it explicitly on every run. `model_routing` is one
+`provider:model` per agent role — `422` on an unknown provider, an unpriceable model, or a
+role this deployment does not know. `dispatch: false` stages the row without running it.
+
+**`501`** on the desktop host is no longer possible — it drives the run in-process — but a
+deployment with no worker and no in-process driver will say so rather than persist a run
+nothing advances.
+
+### `GET /runs`
+
+Query: `project_id` (optional), `archived` (default `false`), `limit` (default 50, capped
+at 200). `{"runs": [...]}`, newest first, each row carrying `id`, `project_id`, `question`,
+`status`, `depth`, `demo`, `cost_usd`, `citation_resolution_rate`, `has_artifact`,
+`archived_at` and `created_at`.
+
+`citation_resolution_rate` is `null` when nothing was measured and a number when something
+was. **Never read `null` as `0`** — a report with no citable claims and a report whose every
+marker is broken are opposite findings.
+
+### `GET /runs/{id}`
+
+The whole run graph in one response: `run`, `plans`, `sources`, `evidence`, `revisions`,
+`claims`, `claim_evidence_links`, `contradictions`, `reviews`, `artifact`.
+
+`run.offline` says whether the run asked for the Offline guarantee. `run.grounding_report` is
+a corpus-only run's claim-by-claim check against its selected files: `status` (`complete`,
+`unmeasured` or `no_evidence`), the counts of claims supported, rejected (by cause) and
+unmeasured (by cause), passages rewritten or removed, the checking cost kept apart from the
+research cost, and the sha256 of the exact text that was checked. Approving such a report
+answers `409` unless `status` is `complete`, nothing is unmeasured, and the report's text is
+the text that was checked. `run.corpus_selection` is the frozen selection a corpus-only run was created with (the request
+and the exact document versions it resolved to); `run.corpus_id` and `run.corpus_version` are
+the corpus state the run opened. All three are `null` on a web run and on runs created before
+file selections existed, which read their project's whole corpus.
+
+One aggregate rather than nine endpoints, because every view of a run needs a slice of the
+same graph and nine round trips would mean nine places to get the ownership predicate
+wrong. Nothing is flattened and no three-valued vocabulary is collapsed: a client must be
+able to tell `UNCHECKED` from `UNATTESTED`, and `citation_index: null` — retrieved but never
+cited — from a numbered source.
+
+A number is not a citation. The run numbers every source the synthesizer was shown and keeps
+those numbers across a rework, so whether a revision cites a source is that revision's
+`cited_indices` — the numbers its own body cites, ascending, with the reference list
+excluded — not whether the source has an index. Counting "cited" from `citation_index` keeps
+a source that only a rejected draft cited counted as cited on the approved run.
+
+### `GET /runs/{id}/stream`
+
+Server-sent events for one run. See the [SSE protocol](35-sse.md).
+
+### `POST /runs/{id}/plan-review`
+
+`201`. The design gate.
+
+```json
+{ "decision": "APPROVED | REWORK_REQUESTED | REJECTED", "feedback": null, "tasks": null, "dispatch": true }
+```
+
+`tasks: null` means "unedited". `tasks: []` is refused (`422`) rather than treated as no
+edit — a reviewer who excluded everything is a run with nothing to research, and the
+approval would authorize a search that never happens. An edit is recorded as its own plan
+version, so the plan a run executed is the plan a later reader sees.
+
+**A plan approval never creates an artifact**, and the response carries no `artifact_id`.
+
+### `POST /runs/{id}/report-review`
+
+`201`. The report gate. On `APPROVED` the artifact is frozen in the same transaction, so an
+approval that cannot produce a verifiable artifact is not recorded as an approval.
+
+```json
+{ "revision_version": null, "decision": "APPROVED | REWORK_REQUESTED | REJECTED", "feedback": null, "dispatch": true }
+```
+
+`{"review_id": "...", "gate": "REPORT", "decision": "...", "artifact_id": "..." | null}`.
+`REWORK_REQUESTED` resumes from the synthesizer, not the executor — the same evidence,
+resynthesized — so a rework costs one synthesis rather than a whole run. `409` when the run
+has no report to review.
+
+### `GET /runs/{id}/bundle.json`
+
+The verifiable bundle. Served from the frozen artifact once one exists; before approval it
+is assembled live, which is the honest answer to "what would be frozen if I approved this?".
+
+**`409`** with a reason when it cannot be assembled — `NO_REVISION` (no report yet) or
+`EVIDENCE_UNAVAILABLE` (the run's evidence was never read out of its checkpoint, so an
+empty evidence list would be an unmeasured zero presented as a measured one).
+
+### `GET /runs/{id}/verification`
+
+Every check the standalone verifier ran over this run's bundle, with its verdict. The same
+code path `python -m research_engine.verify_bundle` uses, so the answer here and the answer
+offline cannot disagree.
+
+### `GET /runs/{id}/cited-documents/{document_id}`
+
+One document version this run cited, wherever it is stored now: its extracted text, the same
+shape as `GET /projects/{id}/corpus/documents/{doc_id}/text`. `…/download` returns the
+original file, with the corpus download route's headers. Each project's documents are
+private to it, so a report in one project can quote a document that now lives in another.
+On the desktop, every document uploaded before 3.1 is in the project "Documents from before
+3.1". This route is how such a citation still opens, and it grants nothing else
+(internal/rfcs/V3.1-corpus-scope.md §7.3):
+
+- **Only what the run cited.** `document_id` must be a corpus source the run recorded. Where
+  the run's selection pinned a hash, the stored version must still match it.
+- **Located from the run, not the request.** The run's own project is searched. On the
+  desktop, the legacy project is searched too. When the run recorded which corpus it read,
+  any other corpus is skipped.
+- **`404` for everything else**, with the same body as a missing document. There is no
+  listing, no search, and no other version of the same file.
+
+`GET /research/{id}/cited-documents/{document_id}` (and `…/download`) is the session twin,
+with the same rules on the session's recorded sources.
+
+### Exports
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/runs/{id}/export.md` | `text/markdown`, as an attachment |
+| `GET` | `/runs/{id}/export.pdf` | `application/pdf`. **`501`** if WeasyPrint's native libraries are unavailable (always on desktop) |
+
+### Lifecycle
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/runs/{id}/cancel` | Durable. A cancelled run stays cancelled — no outcome arriving later can move it back. It does **not** interrupt work in flight; that work runs to its next checkpoint and the tokens it spends are recorded. |
+| `POST` | `/runs/{id}/archive` | Idempotent. Out of History without deleting. |
+| `POST` | `/runs/{id}/unarchive` | Idempotent. |
+| `DELETE` | `/runs/{id}` | `204`. **`409`** while the run is still active (`PENDING`, `RUNNING`, `AWAITING_PLAN`, `AWAITING_REVIEW`) — cancel it first. Removes the run, its plans, sources, evidence, revisions, claims, links, contradictions, reviews, artifact, trace and project-memory chunks. |
+
+---
+
+## Research sessions
+
+Research recorded before runs. These endpoints stay so existing sessions remain readable,
+chattable and exportable; **nothing in the interface starts a new one**. New research goes
+through `POST /runs`.
+
+### `POST /research`
+
+`202`. Starts a run.
+
+```json
+{
+  "query": "10 to 2000 characters",
+  "depth": "fast | balanced | comprehensive",
+  "project_id": null,
+  "model_routing": null,
+  "corpus_mode": false,
+  "demo": false,
+  "topic_seeds": [],
+  "outline_template": null,
+  "skip_plan_gate": true
+}
+```
+
+Only `query` is required. `project_id` omitted resolves to your default project.
+`model_routing` omitted falls back to your saved preference, then the deployment default.
+
+> **`skip_plan_gate` defaults to `true` here and that is deliberate.** The app's run form
+> sends `false` explicitly, so a person using the product gets the design gate. This default
+> governs a different population: a script posting the body it posted before the gate
+> existed, for which an invisible pause it never polls past would be a breaking change.
+
+Returns `{"session_id": "uuid", "status": "PENDING"}`.
+
+`402` when the monthly token limit is already reached, checked **before** enqueueing so a
+capped user gets a clear error rather than a session that fails mid-run. `422` on an
+unroutable model. `429` when the research rate limit is enabled and hit.
+
+### `GET /research`
+
+Query parameters: `page` (default 1), `limit` (default 20, max 100), `archived` (default
+`false`), `project_id`.
+
+Returns `{sessions, total, page, limit}` with **slim** rows — no report bodies. Each row
+carries `session_id`, `project_id`, `status`, `prompt`, `research_depth`, cost and token
+totals, `elapsed_seconds`, `rework_count`, `created_at`, `archived_at`, `demo`,
+`corpus_mode`, `citation_resolution_rate`, and `model_routing`.
+
+`archived` selects one list or the other rather than merging them: archiving exists to get a
+session *out* of the way, so the default view never includes archived sessions.
+
+`citation_resolution_rate` is **`null` when not measured**, never `0.0`.
+
+### `GET /research/{id}`
+
+The full session: everything on the summary plus `draft_report`, `final_report`, `sources`,
+`error_message`, and `updated_at`. `404` if it is not yours.
+
+Each source is `{index, url, title, snippet, snippets[]}`. `snippets` holds **every** verbatim
+snippet extracted from that source; `snippet` is the first, kept for older stored rows.
+
+### `GET /research/{id}/stream`
+
+Server-sent events. See the [SSE protocol](35-sse.md).
+
+### `GET /research/outline-templates`
+
+The report structures offered at the design gate, each with `id`, `label`, `summary`, and
+`sections`. Served from the same module the synthesizer is handed, so the preview is what it
+gets.
+
+### `GET /research/{id}/plan`
+
+The research design this run is working from:
+`{session_id, status, tasks[], outline[], approved_at}`.
+
+**`404` when the run has no plan**, rather than an empty one — a run that skipped the gate has
+no design to show, and `{"tasks": []}` would read as "the planner proposed nothing".
+
+### `POST /research/{id}/plan`
+
+```json
+{ "tasks": [ {"id": 1, "query": "...", "rationale": "...",
+              "subtopics": [], "include": true, "source_hint": null} ],
+  "outline": [ {"title": "...", "description": "..."} ] }
+```
+
+Both keys are optional, and **an absent key means *unedited*** — distinct from `[]`, which is
+a reviewer who excluded everything. `include: false` drops a task from the run. Max 24 of
+each.
+
+Writes a `plan_approved` audit row hashing the approved design, then resumes. `409` unless
+the session is `AWAITING_PLAN`. `422` if nothing is left included.
+
+### `POST /research/{id}/approve`
+
+```json
+{ "approved": true, "feedback": null }
+```
+
+`feedback` is **required** when `approved` is `false`. Writes an audit row with the SHA-256
+of the reviewed draft, then resumes: approve goes to the finalizer, reject re-runs synthesis.
+
+`409` unless the session is `AWAITING_APPROVAL`, or when the rework limit (3) is reached.
+
+### `POST /research/{id}/cancel`
+
+Stops a `PENDING` or `RUNNING` run: the session becomes `FAILED` with "Research stopped by
+user", a `FAILED` event is published, and a cancellation flag is set for the worker. `400`
+from any other status.
+
+### `POST /research/{id}/archive` · `POST /research/{id}/unarchive`
+
+Move a session out of, or back into, the active list. Reversible, loses nothing.
+
+### `DELETE /research/{id}`
+
+`204`. Permanent. Agent logs, chat messages, and audit rows cascade; the graph checkpoints
+are dropped explicitly, because cascades cannot reach them and they hold fetched page
+content. `409` while the session is `RUNNING`.
+
+### Exports
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/research/{id}/export.md` | `text/markdown`, as an attachment |
+| `GET` | `/research/{id}/export.pdf` | `application/pdf`. **`501`** if WeasyPrint's native libraries are unavailable |
+| `GET` | `/research/{id}/export.bundle.json` | `application/json`. **`400`** unless the session is `COMPLETED` |
+
+`404` when there is no report to export. Demo sessions are stamped — see
+[Exports](../user-guide/29-exports.md) and
+[the bundle format](15-bundle-format.md).
+
+---
+
+## Report chat
+
+Over a session's approved report. Runs use
+[project chat](#project-chat), which cites every approved report in a project.
+
+### `GET /research/{id}/chat`
+
+The message history for this report: `[{id, session_id, role, content, created_at}]`.
+
+### `POST /research/{id}/chat`
+
+```json
+{ "message": "1 to 4000 characters", "scope": "report" }
+```
+
+`scope` is `report` (default), `corpus`, `web`, or `everything`. Streams SSE:
+`connected{scope, sources, notes}` → `chunk`* → `done{message_id}`, or `error{detail}`.
+
+`400` unless the session is `COMPLETED`. `400` when `scope=corpus` and the configured
+embedder is remote — corpus scope promises the question is never embedded off-machine, so it
+refuses rather than quietly sending it. `429` when the chat rate limit is enabled and hit.
+
+**What `corpus` promises, exactly:** no *retrieval* egress. No web retriever runs and the
+query is not embedded remotely. It does not promise zero network calls — the answer is still
+written by a model, which is remote unless chat is routed to a local one.
+
+---
+
+## Projects
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/projects` | `{projects, total}`; each carries a denormalised `session_count` |
+| `POST` | `/projects` | `{name, description?}` → `201`. `409` on a case-insensitive duplicate name |
+| `PATCH` | `/projects/{id}` | `{name?, description?, archived?}` |
+| `DELETE` | `/projects/{id}` | `204`. Cascades sessions, threads, and memory. `409` while a session is `RUNNING` |
+
+---
+
+## Corpus documents
+
+Prefix `/projects/{project_id}/corpus`.
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/documents` | Multipart upload: `file`, optional `doc_key` (a new version of that document), optional `relative_path` (files it into that folder path, creating folders as needed). Accepted extensions are `documents.FORMATS`; anything else is `400`, naming them |
+| `GET` | `/documents` | `[{id, filename, chunks, created_at, size_bytes, downloadable}]` |
+| `GET` | `/documents/{doc_id}/download` | The original bytes |
+| `DELETE` | `/documents/{doc_id}` | `204` |
+| `GET` | `/status` | `{documents, chunks, chunks_by_model, current_model}` |
+| `GET` | `/tree` | `{folders: [{id, parent_id, name}], documents: [...], memberships: [{doc_key, folder_id, display_name}]}`. A document with no membership sits at the root |
+| `POST` | `/folders` | `{name, parent_id?}` → `201 {id, parent_id, name}`. An existing folder of that name there is returned, not duplicated |
+| `PATCH` | `/folders/{folder_id}` | `{name?}` renames; `{move: true, parent_id}` moves (`null` = root). `400` on a name clash or a move into itself |
+| `DELETE` | `/folders/{folder_id}` | Removes it and its subfolders: `{folders_deleted, documents_deleted, versions_deleted}`. A document filed **only** there is deleted with every version; one also in another folder, or never in a folder, is untouched |
+
+A `relative_path` is folder names, never a filesystem path: `.`, `..` and empty parts are
+refused, at most 32 levels deep, 255 characters a name. The same file uploaded into two folders
+is one document with two memberships.
+
+`downloadable` is `false` for documents ingested before originals were retained; the UI keys
+its affordance off it rather than assuming every row has a file.
+
+**PDFs are served `inline`; every other kind is `attachment`.** That is the single exception
+to "an uploaded document never renders in this origin": `application/pdf` plus `nosniff` goes
+to the browser's own sandboxed viewer, which is the only way in-place PDF preview can work.
+The route sets `frame-ancestors 'self'` and an explicit `X-Frame-Options: SAMEORIGIN` for
+PDFs, and keeps `'none'` plus `sandbox` for everything else.
+
+---
+
+## Project chat
+
+Server only — the desktop build has no project memory.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/projects/{id}/threads` | `{threads, total}` |
+| `POST` | `/projects/{id}/threads` | `{title?}` → `201`; the title is derived from the first message if omitted |
+| `DELETE` | `/threads/{id}` | `204`; messages cascade |
+| `GET` | `/threads/{id}/messages` | History with resolved citations |
+| `POST` | `/threads/{id}/messages` | `{message, scope?}` → SSE. **`503`** when no embeddings provider is reachable |
+| `GET` | `/projects/{id}/memory/status` | Memory legibility — see below |
+
+`POST /threads/{id}/messages` streams `connected{citations}` → `chunk`* →
+`done{message_id, citations}`. Citations are sent on `connected`, **before the first token**:
+they describe what was *retrieved*, which is settled the moment the query runs.
+
+It returns `503` rather than an ungrounded answer when embeddings are unavailable. This
+endpoint's contract is that answers come from approved research.
+
+`GET /projects/{id}/memory/status` returns `available`, `chunk_count`, `indexed_reports`,
+`approved_reports`, `pending_reports`, `current_model`, a per-model breakdown, `stale_models`,
+and `last_ingest_at`. `pending_reports` and `stale_models` are the two ways memory goes
+quietly incomplete, and neither is otherwise distinguishable from "there is nothing on that".
+
+---
+
+## Models and routing
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/models` | The catalog, presets, available providers, and effective/user/deployment routing |
+| `GET` | `/models/readiness` | Whether this user can run research at all: `{ready, has_cloud_key, local_reachable, local_chat_models}` |
+| `GET` | `/models/routing` | `{routing, effective_routing}`; `routing` is `null` when on the deployment default |
+| `PUT` | `/models/routing` | `{routing: {role: "provider:model"}}`. Validated on write |
+| `DELETE` | `/models/routing` | Clears the preference |
+| `POST` | `/models/providers/test` | Probe a key before storing it → an `ok`/`degraded`/`failed` verdict |
+| `GET` | `/models/providers/health` | Re-probe the stored key |
+| `GET` | `/models/local/status` | Ollama discovery |
+| `GET` | `/models/prompt-defaults` | What each role's prompt editor starts from: `{max_chars, roles: [{role, default_prompt, untrusted_content_framed}]}`. The five roles' shipped prompts with the system-added untrusted-content instruction removed; `untrusted_content_framed` says the system adds it around a replacement. Identical for every user and on both hosts — never a protected prompt, never the caller's own overrides |
+| `POST` | `/models/local/pull` | Pull a model, streaming progress |
+
+Each catalog entry carries `route`, `provider`, `model_id`, `display_name`, per-million input
+and output prices (**`null` means the deployment must supply one, not free**), context window,
+max output tokens, tool and structured-output support, notes, and whether *this user* has a
+usable key for it.
+
+`/models/local/status` returns `install_state` as `running`, `installed_not_running`, or
+`not_installed` — three states, because "installed but not running" needs the start button
+and "not installed" needs the installer link, and they used to look identical. Each listed
+model reports `params_b`, `likely_underpowered`, `is_embedding`, and whether its family is in
+the catalog.
+
+**Routing validation runs on write**, so a stored preference is always startable and a run
+cannot fail halfway on a model that could have been rejected when it was picked.
+
+---
+
+## Desktop-only endpoints
+
+The desktop sidecar serves the same contract with three deliberate differences: keys come
+from the OS keychain rather than a decrypted column, there is no rate-limit dependency (it
+needs Redis and a user model, and the desktop has neither), and corpus files live in the app's
+data folder rather than under `CORPUS_DIR`. From 3.1 the desktop, like the server, keeps one
+corpus per project; the app-wide `/corpus/*` routes earlier desktop releases served are gone.
+
+It additionally exposes `/desktop/keys` (`GET`, `PUT /{provider}`, `DELETE /{provider}`,
+`PUT /custom_endpoint`) and `/models/local/{start,stop}` for supervising a local model server.
+
+**`/threads` is absent by design** — project memory is pgvector-only.

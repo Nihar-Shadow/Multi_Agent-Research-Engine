@@ -1,0 +1,103 @@
+"""
+`desktop/sidecar.py` is a thin adapter, and a line count is how that stays true (plan
+phase 11).
+
+Phase 6 declined to physically move the run/session/project/corpus handlers into
+`app/handlers/` — `test_one_canonical_owner` already proves single ownership by identity,
+so the move would rename files without closing a gap (`internal/plans/13_
+One_Runtime_Two_Hosts.md` §0.10). That decision means `sidecar.py` legitimately keeps code
+no thin transport layer would: the desktop-only routes (`/desktop/keys/*`, `/local/start`,
+`/local/stop`, the flat `/corpus/*` convenience routes), and the host implementations of
+every port this plan built (`_DesktopCorpusLocator`, `get_checkpoint_deleter`,
+`get_terminal_event_emitter`, `sidecar_run_config`). Revision 1's target of "~450 lines"
+assumed the handler move would happen; it did not, so that number is not a ceiling this
+file can honestly reach and is not used here.
+
+What this file still guards: the file should never grow *without someone noticing*. Every
+phase in this plan that delegated a route shrank `sidecar.py` — Phase 7 by ~700 lines
+across the run, session, project and corpus surfaces combined. A ceiling that only ever
+rises would let that trend reverse silently, one route at a time, the same way the
+duplication this whole plan exists to remove first accumulated.
+
+`CEILING` ratchets down as more delegates and is lowered in the same commit that shrinks
+the file — never raised to make a growing file pass. Growing past it is not necessarily
+wrong (a new desktop-only feature needs somewhere to live), but it must be a deliberate
+edit to this number with a reason, not a side effect nobody reviewed.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+SIDECAR = Path(__file__).resolve().parents[2] / "desktop" / "sidecar.py"
+
+#: 3,071 lines as of PR-3b's cited-document routes (RFC V3.1 §7.3): four wrappers over
+#: `app.api.v1.runs`/`research` `get_cited_document_text`/`download_cited_document`, which
+#: hold every rule. The one thing each adds is this host's extra place to look, the
+#: "Documents from before 3.1" project (`corpus_layout.legacy_project_id`), which only this
+#: host has. Raised deliberately for those four routes.
+#: Was 3,016 (ceiling 3,020) before them.
+#: Was 3,059 as of PR-11: `PATCH /auth/me` refuses a preference by raising the server's own
+#: `RequestValidationError` (`app.services.error_responses.body_validation_error`, scope freeze
+#: §7) instead of building a smaller body by hand, which removed the hand-built one.
+#: Was 3,063 as of PR-10's `GET /models/prompt-defaults`: an eight-line wrapper that
+#: delegates to `app.api.v1.models.get_prompt_defaults` and restates nothing — the one
+#: route the prompt editors need, and it cannot live anywhere but here on this host.
+#: Was 3,059 before keyless local models worked on the desktop. The rules moved out —
+#: whether a routing needs a key and which providers are usable are
+#: `research_engine.local.providers_missing_a_key`/`usable_providers`, shared with the CLI —
+#: so what grew is `provider_keys`: this host reading its own key store (keychain, saved
+#: endpoint) outside a run, which the catalog needs and no server route owns.
+#: Was 3,055 as of PR-6's prompt-override snapshot. The *rules* all delegate — the freeze
+#: and the row-read are `run_execution.freeze_prompt_overrides`/`prompt_overrides_for_run`,
+#: the chat scope is `run_config.chat_prompt_context`, called rather than restated — so what
+#: grew is the two in-process drivers, `_drive_run` and `_drive_session`, which are this
+#: host's Celery replacement and have no `app/api/v1/*` route to hand work to. Raised
+#: deliberately for that reason, not to let a growing file pass.
+#: Was 3,020 as of PR-5's shared preference validation: `PATCH /auth/me` now validates the
+#: body through `app.schemas.auth.UserPreferences` and merges it through
+#: `app.services.preferences.merge_preferences`, instead of merging raw JSON. That is fewer
+#: lines of rule and more lines of plumbing — the validation and the merge both live on the
+#: server side of the boundary now, and what is left here is the transport that calls them.
+#: Raised from 3,005, which was as of the legacy `agent_logs` rebuild: an installed database created before
+#: `session_id` became polymorphic kept `fk_agent_logs_session_id_sessions`, and with
+#: `PRAGMA foreign_keys=ON` every run-sourced trace insert failed — silently, because the
+#: sink logs rather than raises. Alembic fixes this on Postgres (`0018`); this host does not
+#: run Alembic and `alembic` is excluded from the PyInstaller bundle, so the rebuild is
+#: hand-rolled here. Same class as the entries below: desktop-only schema code with no
+#: `app/api/v1/*` route to delegate to, because `create_all` plus a schema sync is how *this*
+#: host builds its schema and no server route owns that. Was 2,915 as of A9's startup guard: `_add_missing_columns` now detects a
+#: populated table before issuing `ADD COLUMN … NOT NULL`, and refuses by name instead of
+#: letting SQLite raise a driver error during startup that names neither table nor column.
+#: Raised from 2,900 deliberately rather than by trimming the guard — this is the same class
+#: as the two entries below it: desktop-only code with no `app/api/v1/*` route to delegate to,
+#: because `create_all` plus a column sync is how *this* host builds its schema and no server
+#: route owns that. Was 2,876 at the Windows shell-watchdog fix (`shell_alive`/
+#: `_win32_pid_alive`, plus the sidecar finally calling `configure_logging` — process
+#: supervision and logging bootstrap for a process that is not itself an HTTP handler), and
+#: 2,850 before that, itself down from 3,015 before plan phase 7 began delegating session
+#: routes. Small headroom above the current count, not a target to grow into.
+CEILING = 3071
+
+
+def test_sidecar_has_not_grown_past_its_ratchet():
+    lines = SIDECAR.read_text(encoding="utf-8").count("\n")
+    assert lines <= CEILING, (
+        f"desktop/sidecar.py is {lines} lines, over the {CEILING}-line ratchet. If this "
+        "growth is a new route that should delegate to app/api/v1/*, delegate it instead "
+        "of raising the ceiling. If it is a genuine new desktop-only feature, raise "
+        "CEILING in this file, in the same commit, with a reason in the commit message."
+    )
+
+
+def test_the_ceiling_itself_has_not_gone_stale():
+    """The other direction: a ceiling left high after the file shrank is a ceiling that
+    stopped doing its job — the next 200 lines of drift would pass silently until this
+    caught up. Same anti-rot shape as `DIVERGENT_BY_DESIGN`'s own tests: the number is
+    allowed to be generous, not allowed to be forgotten."""
+    lines = SIDECAR.read_text(encoding="utf-8").count("\n")
+    slack = CEILING - lines
+    assert slack < 200, (
+        f"desktop/sidecar.py is {lines} lines but CEILING is {CEILING} — {slack} lines of "
+        "slack. Lower CEILING to close the gap; a ceiling this loose stops catching growth."
+    )

@@ -1,0 +1,152 @@
+# What Dependabot is for here: telling us about upgrades we would not otherwise notice.
+#
+# It had drifted into the opposite. Twenty-three dependency pull requests merged in the
+# eight days to 2026-09-09, nearly all of them patch bumps, each costing a full CI matrix
+# — and one of them (`next` 16.3.4) was merged and then reverted, which is what a review
+# queue looks like when every entry carries the same weight regardless of importance.
+#
+# The filtering below is deliberately different per ecosystem, because the same bump has
+# very different consequences in each:
+#
+#   pip   every requirement in `backend/requirements.txt` is a `>=` floor, so
+#         `pip install -r requirements.txt` resolves to the newest compatible release at
+#         build time, and a PR raising a floor within a major changes nothing about what gets
+#         installed — it re-documents a minimum. Only a **major** floor is a real decision.
+#         The exception is `backend/constraints.txt`: the provider SDKs and their HTTP stack
+#         are pinned exactly, because a transitive float there once changed how every
+#         provider call is retried. Those do not move until someone moves the pin
+#         (backend/AGENTS.md, "Provider SDKs are pinned").
+#
+#   npm   `frontend/package-lock.json` pins exactly, so a bump here genuinely changes what
+#         ships. Minors are worth seeing; patches are not worth one PR each.
+#
+# **This file governs version updates only.** Dependabot *security* updates are a separate
+# channel driven by advisories, enabled on this repository, and are NOT suppressed by the
+# `ignore` rules below — which is the whole reason filtering routine noise is safe rather
+# than reckless. CI's `pip-audit` and `npm audit` stay advisory; neither fixes anything.
+#
+# That safety is **conditional, and the condition is invisible at the rule**: `update-types`
+# is scoped to version updates, so an `ignore` entry qualified by it leaves the security
+# channel alone — but an entry naming a dependency with *no* `update-types` (or a
+# `versions:` range) silences that dependency on **both** channels. Every entry below is
+# qualified, deliberately. Adding a bare `dependency-name` is how this file would start
+# hiding advisories while still reading as if it only trimmed noise.
+
+version: 2
+updates:
+  # ── Backend: majors only ───────────────────────────────────────────────────────────
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    ignore:
+      # Not "these are unimportant" — with `>=` floors these updates are already in effect
+      # before the PR exists. Raising the floor only records a decision nobody made. A major
+      # is different: it is the one that can break the build. For the pins in
+      # constraints.txt the reasoning inverts — their minors and patches do NOT arrive on
+      # their own — and they stay out of this queue anyway, deliberately: moving one is a
+      # reviewed change against its changelog, and pip-audit plus security updates (which
+      # this rule does not suppress) are what say one is due.
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-patch"
+          - "version-update:semver-minor"
+
+  # ── Frontend: minors, batched ──────────────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    ignore:
+      # ESLint 10 removed the deprecated `context.getFilename()`. `eslint-plugin-react`
+      # 7.37.5 — which we do not depend on directly; `eslint-config-next` 16.3.2 pins it —
+      # still calls it (`lib/util/version.js:31`), so every lint run dies before reporting
+      # a single finding:
+      #
+      #     TypeError: Error while loading rule 'react/display-name':
+      #     contextOrFilename.getFilename is not a function
+      #
+      # The plugin's own `peerDependencies` say `eslint@^3 || … || ^9.7`, so this is not a
+      # configuration we can adjust — v10 is unsupported upstream and #98 was unmergeable
+      # rather than merely red. Ignoring the major keeps it from being reproposed weekly,
+      # each time costing a full CI matrix to rediscover the same upstream fact.
+      #
+      # **Remove this the moment `eslint-config-next` ships an `eslint-plugin-react` that
+      # declares v10 support** — check its peer range, not its version number.
+      - dependency-name: "eslint"
+        update-types: ["version-update:semver-major"]
+      # Patch bumps are the bulk of the volume and almost none of the value. A patch that
+      # matters arrives through the security channel instead, which this does not touch.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]
+    groups:
+      # react and react-dom are exact-pinned and reach into each other's internals, so
+      # they are one unit even though npm calls them two packages. Ungrouped, Dependabot
+      # opened #66 bumping react 19.2.4 -> 19.2.8 and leaving react-dom on 19.2.4: the
+      # mismatched pair failed to load and took 10 of 20 Vitest suites with it, which no
+      # rebase could fix because nothing was stale. The type packages ride along because
+      # @types/react and @types/react-dom are versioned against the same pair.
+      #
+      # Declared first, and excluded from the catch-all below by name rather than by
+      # ordering, so the pairing survives someone reordering this file.
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      # Everything else that is worth seeing arrives as one reviewable PR per month
+      # instead of eight. Majors stay ungrouped: each is a decision on its own.
+      frontend-minor:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+        update-types:
+          - "minor"
+
+  # ── CI workflows: batched ──────────────────────────────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    groups:
+      # Action bumps are near-always mechanical and are safest reviewed together, where a
+      # single red matrix implicates one PR rather than five.
+      github-actions:
+        patterns:
+          - "*"
+
+  # ── Base images: batched ───────────────────────────────────────────────────────────
+  # A Python bump to the backend image arrives red, by design. The image, every job that
+  # tests or stamps it, and the desktop engine run one interpreter (A10.06, in the required
+  # `One version, everywhere`), and Dependabot can edit only the Dockerfile — #173 moved the
+  # image to 3.14 that way with CI left on 3.11. It is not ignored: a Python minor comes once
+  # a year, and the red PR is the notice that one exists. Land it by adding the matching
+  # `python-version` changes in `ci.yml`, `release.yml` and `desktop.yml` to the same branch
+  # — the last moves the interpreter PyInstaller freezes, so the PR waits for a PyInstaller
+  # release that supports it and for a launched build (AGENTS.md) — and by moving every
+  # stated floor A10.06 names, ruff's target included, with what that target then rewrites.
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "monthly"
+    groups:
+      backend-images:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/frontend"
+    schedule:
+      interval: "monthly"
+    groups:
+      frontend-images:
+        patterns:
+          - "*"

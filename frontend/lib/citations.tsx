@@ -1,0 +1,311 @@
+"use client";
+
+import { useMemo } from "react";
+import Markdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+import { parseCorpusLocator, type CorpusLocator } from "./corpusLocator";
+import type { Source } from "./types";
+
+/**
+ * Citations UX (docs/27) — the product's differentiator.
+ *
+ * Inline `[n]` markers in the report/draft are turned into small superscript chips
+ * with a hover/focus popover carrying the source's title, domain and the verbatim
+ * supporting snippet. A marker whose number has no matching source renders a visible
+ * ⚠ "unverified" chip — we surface pipeline bugs instead of hiding them.
+ *
+ * The `[n]` → chip transform is a tiny hand-written rehype plugin that walks the HAST
+ * and replaces citation runs inside text nodes with `<cite>` elements. Doing it at the
+ * tree level (not by regex on the markdown string) keeps code blocks untouched and
+ * never corrupts surrounding markup. No raw-HTML rehype plugin is used — the markdown
+ * pipeline stays sanitized by construction and CI guards against one (docs/06 §5).
+ */
+
+// ─── HAST (minimal shapes we touch) ─────────────────────────────────────────────
+interface HastText {
+  type: "text";
+  value: string;
+}
+interface HastElement {
+  type: "element";
+  tagName: string;
+  properties?: Record<string, unknown>;
+  children: HastNode[];
+}
+type HastNode =
+  | HastText
+  | HastElement
+  | { type: string; value?: string; children?: HastNode[]; properties?: Record<string, unknown>; tagName?: string };
+
+/**
+ * Citation markers, including *grouped* ones.
+ *
+ * The synthesizer routinely writes `[1, 3]` or `[1, 2, 3, 4, 6]` when a sentence draws on
+ * several sources — standard academic style, and the prompt never forbade it. An earlier
+ * single-number-only pattern (`\[(\d+)\]`) silently failed to match those: the text stayed
+ * inert, no chip rendered, no link, and — worst of all — no ⚠ either, so a citation could
+ * fail to resolve without the UI ever admitting it. On a measured real report, 42% of all
+ * citation references were inside grouped brackets and therefore invisible.
+ *
+ * Matching the group and emitting one chip per number is what keeps "every claim is
+ * traceable, and we show you when it isn't" true rather than aspirational.
+ */
+const SKIP_TAGS = new Set(["code", "pre", "cite", "a"]);
+
+/**
+ * Marker patterns, parameterised by prefix.
+ *
+ * Report citations are bare numbers (`[1]`); project-chat answers cite retrieved
+ * excerpts with an `R` prefix (`[R1]`, docs/14 §5). Both need identical treatment —
+ * group splitting, skip-tags, the ⚠ fallback — so the machinery is shared and only the
+ * prefix differs. Duplicating it for the second marker type is how one of them would
+ * quietly lose the grouped-marker fix below.
+ */
+function markerPatterns(prefix: string) {
+  const one = `${prefix}\\d+`;
+  return {
+    test: new RegExp(`\\[${one}(?:\\s*,\\s*${one})*\\]`),
+    all: new RegExp(`\\[(${one}(?:\\s*,\\s*${one})*)\\]`, "g"),
+  };
+}
+
+function citeNode(n: number, prefix: string, resolved: Set<number>): HastNode {
+  return {
+    type: "element",
+    tagName: "cite",
+    properties: { dataIndex: String(n), dataResolved: resolved.has(n) ? "1" : "0" },
+    children: [{ type: "text", value: `[${prefix}${n}]` }],
+  };
+}
+
+function splitCitations(
+  value: string,
+  prefix: string,
+  resolved: Set<number>,
+  all: RegExp,
+): HastNode[] {
+  const out: HastNode[] = [];
+  all.lastIndex = 0;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = all.exec(value)) !== null) {
+    if (m.index > last) out.push({ type: "text", value: value.slice(last, m.index) });
+    // `[1, 3]` becomes two independent chips, so each source gets its own popover and
+    // each unresolved number gets its own ⚠ rather than one verdict for the whole group.
+    for (const part of m[1].split(",")) {
+      out.push(citeNode(Number(part.trim().replace(prefix, "")), prefix, resolved));
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < value.length) out.push({ type: "text", value: value.slice(last) });
+  return out;
+}
+
+export function makeMarkerPlugin(resolved: Set<number>, prefix = "") {
+  const { test, all } = markerPatterns(prefix);
+  const transform = (node: HastNode): void => {
+    if (node.type === "element" && SKIP_TAGS.has((node as HastElement).tagName)) return;
+    const children = (node as HastElement).children;
+    if (!Array.isArray(children)) return;
+    const next: HastNode[] = [];
+    for (const child of children) {
+      if (child.type === "text" && typeof child.value === "string" && test.test(child.value)) {
+        next.push(...splitCitations(child.value, prefix, resolved, all));
+      } else {
+        transform(child);
+        next.push(child);
+      }
+    }
+    (node as HastElement).children = next;
+  };
+  return () => (tree: HastNode) => transform(tree);
+}
+
+// ─── Rendering ──────────────────────────────────────────────────────────────────
+
+export function domainOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Every snippet this source contributed, newest schema first.
+ *
+ * Falls back to the single `snippet` field for sessions stored before `snippets` existed
+ * (docs/12 M5, defect D3), so an old report still renders its citation popovers.
+ */
+export function snippetsOf(source: Source): string[] {
+  if (source.snippets?.length) return source.snippets;
+  return source.snippet ? [source.snippet] : [];
+}
+
+function CitationChip({
+  source,
+  onPreview,
+}: {
+  source: Source;
+  onPreview?: (locator: CorpusLocator, source: Source) => void;
+}) {
+  const snippets = snippetsOf(source);
+  // A corpus citation's URL uses a scheme the browser cannot follow, so it gets a
+  // preview action instead of a link. Without `onPreview` wired by the surface, it
+  // renders neither — a dead "Open source ↗" is worse than no affordance, because it
+  // claims the source is checkable and then refuses to show it.
+  const locator = parseCorpusLocator(source.url);
+  return (
+    <span className="group relative inline-block align-baseline">
+      <button
+        type="button"
+        aria-label={`Source ${source.index}: ${source.title || domainOf(source.url)}`}
+        className="align-super font-mono text-[0.65em] font-semibold leading-none text-accent px-1 py-0.5 bg-accent-muted border border-border hover:brightness-95 transition"
+      >
+        [{source.index}]
+      </button>
+      <span
+        role="tooltip"
+        className="pointer-events-none invisible absolute bottom-full left-1/2 z-20 mb-2 w-72 -translate-x-1/2 border border-border bg-bg-elevated p-3 text-left opacity-0 shadow-lg transition-opacity duration-150 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+      >
+        <span className="block font-serif text-xs font-semibold text-text-primary">
+          {source.title || domainOf(source.url)}
+        </span>
+        <span className="mt-0.5 block font-mono text-[0.6875rem] text-text-muted">
+          {locator ? "your corpus" : domainOf(source.url)}
+        </span>
+        {snippets.map((text, i) => (
+          <span
+            key={i}
+            className="mt-2 block border-l-2 border-accent pl-2 text-xs italic text-text-secondary"
+          >
+            &ldquo;{text}&rdquo;
+          </span>
+        ))}
+        {locator ? (
+          onPreview && (
+            <button
+              type="button"
+              onClick={() => onPreview(locator, source)}
+              className="pointer-events-auto mt-2 inline-block font-mono text-[0.6875rem] font-medium text-accent hover:underline"
+            >
+              Preview document{locator.page ? ` (p. ${locator.page})` : ""}
+            </button>
+          )
+        ) : (
+          <a
+            href={source.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="pointer-events-auto mt-2 inline-block font-mono text-[0.6875rem] font-medium text-accent hover:underline"
+          >
+            Open source ↗
+          </a>
+        )}
+      </span>
+    </span>
+  );
+}
+
+export function UnverifiedChip({ n, prefix = "" }: { n: number; prefix?: string }) {
+  return (
+    <span
+      title={`Citation [${prefix}${n}] does not resolve to a source — unverified`}
+      className="mx-0.5 inline-flex items-center gap-0.5 px-1 align-super font-mono text-[0.65em] font-semibold text-danger border border-danger/30"
+      style={{ backgroundColor: "color-mix(in srgb, var(--danger) 10%, var(--bg-surface))" }}
+    >
+      ⚠[{prefix}
+      {n}]
+    </span>
+  );
+}
+
+export function Report({
+  markdown,
+  sources,
+  onPreview,
+}: {
+  markdown: string;
+  sources: Source[];
+  /** Supplied by a surface that can open the preview drawer. Absent on surfaces that
+   *  cannot, so a corpus citation shows its snippets and no unusable action. */
+  onPreview?: (locator: CorpusLocator, source: Source) => void;
+}) {
+  const sourceByIndex = useMemo(() => {
+    const map = new Map<number, Source>();
+    for (const s of sources) map.set(s.index, s);
+    return map;
+  }, [sources]);
+
+  const resolved = useMemo(() => new Set(sourceByIndex.keys()), [sourceByIndex]);
+  const rehypePlugins = useMemo(() => [makeMarkerPlugin(resolved)], [resolved]);
+
+  const components = useMemo<Components>(
+    () => ({
+      cite({ node }) {
+        const props = (node?.properties ?? {}) as { dataIndex?: string; dataResolved?: string };
+        const n = Number(props.dataIndex);
+        const source = sourceByIndex.get(n);
+        if (props.dataResolved !== "1" || !source) return <UnverifiedChip n={n} />;
+        return <CitationChip source={source} onPreview={onPreview} />;
+      },
+      // External links always open safely.
+      a({ href, children }) {
+        return (
+          <a href={href} target="_blank" rel="noopener noreferrer">
+            {children}
+          </a>
+        );
+      },
+    }),
+    [sourceByIndex, onPreview],
+  );
+
+  return (
+    <div className="prose prose-sm dark:prose-invert max-w-none break-words">
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        // The plugin builds our own HAST elements — this is not raw-HTML passthrough.
+        rehypePlugins={rehypePlugins as never}
+        components={components}
+      >
+        {markdown}
+      </Markdown>
+    </div>
+  );
+}
+
+export function SourcesPanel({ sources }: { sources: Source[] }) {
+  if (!sources.length) return null;
+  return (
+    <section aria-labelledby="sources-heading" className="mt-8 border-t border-border pt-6">
+      <h2 id="sources-heading" className="mb-4 text-sm font-semibold text-text-primary">
+        Sources ({sources.length})
+      </h2>
+      <ol className="space-y-3">
+        {sources.map((s) => (
+          <li key={s.index} className="flex gap-3 text-sm">
+            <span className="mt-0.5 shrink-0 font-mono text-xs text-accent">[{s.index}]</span>
+            <div className="min-w-0">
+              <a
+                href={s.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium text-text-primary hover:text-accent hover:underline"
+              >
+                {s.title || domainOf(s.url)}
+              </a>
+              <span className="ml-2 text-xs text-text-muted">{domainOf(s.url)}</span>
+              {snippetsOf(s).map((text, i) => (
+                <p key={i} className="mt-1 line-clamp-3 text-xs italic text-text-secondary">
+                  &ldquo;{text}&rdquo;
+                </p>
+              ))}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}

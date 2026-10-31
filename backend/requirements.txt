@@ -1,0 +1,92 @@
+# Exact versions for the provider SDKs and their HTTP stack, applied to every install that
+# reads this file — Dockerfile, CI, pip-audit, the desktop sidecar build (constraints.txt).
+-c constraints.txt
+
+# API
+fastapi>=0.141.1,<1.0
+uvicorn[standard]>=0.52.4
+python-multipart>=0.0.9
+pydantic[email]>=2.13.5,<3.0
+pydantic-settings>=2.15.0
+
+
+# Database
+sqlalchemy[asyncio]>=2.0.52,<2.1
+asyncpg>=0.31.0
+alembic>=1.20.0
+# pgvector's SQLAlchemy type + asyncpg codec for `memory_chunks.embedding` (docs/14 §3).
+# The server-side extension is a separate prerequisite: migration 0006 enables it, and the
+# compose files pin pgvector/pgvector:pgNN because stock postgres images do not ship it.
+pgvector>=0.5.0
+
+# Cache / Queue
+redis[hiredis]>=8.1.0
+celery>=5.6.3,<6.0
+
+# Agent orchestration (docs/03_Tech_Stack.md — real LangGraph, no hand-rolled loops)
+langgraph>=1.2.11
+langgraph-checkpoint-postgres>=3.1.2
+# SQLite checkpointing for the local host (research_engine.cli) and the desktop build
+# (docs/12 M9). Unused by the api/worker runtime, but kept here so CI exercises the
+# local-run tests that prove the engine works without Postgres.
+langgraph-checkpoint-sqlite>=3.1.1
+# AsyncPostgresSaver runs on psycopg (not asyncpg). [binary] bundles libpq so the
+# checkpointer works in the slim container without a system libpq — without this every
+# worker run fails with "no pq wrapper available" (found via docker-compose smoke test).
+psycopg[binary]>=3.3.5
+langchain-core>=1.6.2
+langchain-google-genai>=4.3.7
+# BYOK providers — enabled for Anthropic routing (MODEL_*=anthropic:...).
+langchain-anthropic>=1.7.0
+# Required, not optional: OpenAI, OpenRouter, and Ollama all speak the OpenAI wire
+# protocol, so this one client covers three providers — including Ollama, which is the
+# offline/local-model story (docs/12 M8, docs/13 §6/§8).
+langchain-openai>=1.6.2
+
+# Web research (retriever chain: Tavily → Brave (httpx) → DuckDuckGo fallback)
+tavily-python>=0.8.2
+ddgs
+httpx>=0.28.1
+beautifulsoup4>=4.15.0
+lxml>=6.1.3
+
+# Airgapped corpus mode (docs/12 M10): PDF text extraction (pure Python, PyInstaller-
+# friendly — no GTK/native chain) and brute-force cosine over the SQLite vector store.
+# numpy was already present transitively; pinning it explicitly because corpus.py
+# imports it directly.
+pypdf>=6.16.2
+# Corpus document parsers (RFC V3.1 §11.1). Pinned exactly, not floated: the extracted text
+# is what every citation is verified against, so both hosts must produce identical text
+# from the same file, which a minor-version drift in a parser can silently break.
+python-docx==1.2.0
+python-calamine==0.9.0
+striprtf==0.0.35
+numpy>=2.5.4
+
+# Auth (bcrypt direct — passlib is unmaintained and incompatible with bcrypt>=4.1)
+PyJWT>=2.13.0
+bcrypt>=5.0.0
+# Fernet encryption for user-supplied BYOK provider keys (app/services/crypto.py)
+cryptography>=50.0.1
+# OS keychain access for the desktop sidecar (docs/12 M9). The server never uses it —
+# desktop provider keys live in Keychain/Credential Locker/SecretService, not the DB.
+keyring>=25.7.0
+
+# Observability
+structlog>=26.1.0
+# Prometheus exposition for the server's `/metrics` (docs/31). Pure Python, Apache-2.0,
+# no runtime dependencies of its own — its twisted/aiohttp/django extras are optional and
+# unused. Recorded on BOTH hosts through `app/metrics.py`, so it is in the desktop import
+# tree too; only the scrape endpoint is server-only.
+prometheus-client>=0.26.0
+
+# Export: Markdown → HTML (python-markdown) → PDF (WeasyPrint)
+markdown>=3.10.3
+weasyprint>=70.0
+
+# Testing
+pytest>=9.1.1
+pytest-asyncio>=1.4.0
+
+# Linting
+ruff>=0.16.5

@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1
+#
+# Backend image (docs/09 §1). Two runtime targets share one base:
+#   --target api     → migrations-on-start entrypoint, then uvicorn
+#   --target worker  → celery worker
+# Multi-stage, pinned base, non-root runtime user, HEALTHCHECK, no secrets baked in.
+
+# ── Base: runtime libs shared by both targets ─────────────────────────────────────
+FROM python:3.14-slim-bookworm AS base
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+# Pango/FT for WeasyPrint (PDF export) + curl for the API healthcheck.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpango-1.0-0 libpangoft2-1.0-0 curl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+
+# ── Builder: compile deps into an isolated venv ───────────────────────────────────
+FROM base AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt constraints.txt ./
+RUN python -m venv /venv \
+    && /venv/bin/pip install --upgrade pip \
+    && /venv/bin/pip install -r requirements.txt
+
+# ── Runtime: non-root, app code + venv only ───────────────────────────────────────
+FROM base AS runtime
+RUN useradd --create-home --uid 10001 appuser
+COPY --from=builder /venv /venv
+ENV PATH="/venv/bin:$PATH"
+COPY --chown=appuser:appuser . /app
+# Pre-create the corpus mount point owned by appuser. Compose mounts a named volume at
+# /app/data on both the api and worker targets (docker-compose.full.yml) so per-project
+# corpora survive a container recreate — but Docker creates a fresh volume root-owned,
+# and the api/worker processes run as appuser (never root), so an upload's first write
+# would fail with EACCES. Owning it here, before USER switches away from root, is what
+# makes the volume inherit appuser instead.
+RUN mkdir -p /app/data/corpus && chown -R appuser:appuser /app/data
+USER appuser
+# Which build identity this image reports (`/api/v1/version`). The COPY above carries any
+# `research_engine/_build.py` in the context — a fresh stamp from `release.yml`, or a stale
+# leftover in a developer's checkout. By default it is discarded and the image restamps only
+# from the facts start.sh read from git, else answers `unknown`; release.yml alone passes
+# BUILD_STAMP=context to keep the stamp its own job just wrote. See docker/stamp_image.py.
+# Last, so a changed commit invalidates only this layer, and BUILT_AT is set when the layer
+# actually builds, not on every cached rebuild.
+ARG BUILD_STAMP=local
+ARG BUILD_VERSION
+ARG BUILD_GIT_SHA
+ARG BUILD_DIRTY
+RUN python docker/stamp_image.py
+
+# ── API: migrate then serve ───────────────────────────────────────────────────────
+FROM runtime AS api
+EXPOSE 8000
+HEALTHCHECK --interval=15s --timeout=5s --start-period=40s --retries=5 \
+    CMD curl -fsS http://localhost:8000/health || exit 1
+ENTRYPOINT ["sh", "/app/docker/entrypoint-api.sh"]
+
+# ── Worker: celery ────────────────────────────────────────────────────────────────
+FROM runtime AS worker
+# Pings the broker + this worker; fails the healthcheck if either is unreachable.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=5 \
+    CMD celery -A app.workers.celery_app.celery_app inspect ping || exit 1
+CMD ["celery", "-A", "app.workers.celery_app.celery_app", "worker", \
+     "--concurrency=4", "--loglevel=info"]

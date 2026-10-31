@@ -1,0 +1,873 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/*
+ * next-themes uses the class strategy (.dark on <html>). Tailwind v4 defaults the
+ * `dark:` variant to prefers-color-scheme, so we redefine it to be class-based —
+ * this is what makes `prose dark:prose-invert` and every `dark:` utility follow the
+ * theme toggle instead of the OS setting.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ─── Formal Academic Research-Paper Design Tokens ─────────────────────────────
+ * Color Matrix:
+ *   Paper Background: Light #FBFBFA / Dark #121214 (low contrast backdrop)
+ *   Card Background:  Light #FFFFFF / Dark #1A1A1E (sharp foreground container)
+ *   Strict Border:    Light #D1D1CD / Dark #2E2E34 (sharp 1px dividers, 0 radius)
+ *   Ink Black Text:   Light #111111 / Dark #F4F4F6 (primary reading & headers)
+ *   Muted Ink Text:   Light #666662 / Dark #8E8E93 (secondary & passive elements)
+ *   Academic Accent:  Light #3F5E4D / Dark #527A65 (muted sage green)
+ *   Status: OK:       Light #10B981 / Dark #10B981 (pure emerald green)
+ *   Status: Warn:     Light #F59E0B / Dark #F59E0B (vibrant amber)
+ *   Status: Fail:     Light #EF4444 / Dark #EF4444 (vivid crimson red)
+ *   Badge Frame Block:Light #EAEAE6 / Dark #242428
+ */
+:root {
+  /* 1. Core Palette & Semantic Tokens (Light) */
+  --ink: #111111;
+  --ink-2: #666662;
+  --ink-3: #8C8C88;
+  --blue: #3F5E4D;
+  --good: #10B981;
+  --bad: #EF4444;
+  --panel: #111111;
+  --panel-line: #2E2E34;
+
+  /* 2. Surfaces & Backgrounds */
+  --ground: #FBFBFA;
+  --surface: #FFFFFF;
+  --surface-2: #F2F2EF;
+
+  /* 3. Structural Dividers & Strict Borders */
+  --line: #D1D1CD;
+  --line-2: #C4C4BF;
+
+  /* 4. Academic Accent & Badge Blocks
+   * Deepened from #3F5E4D: the old sage sat at ~3.9:1 on the card surface, which is why
+   * accented text and active states read as barely-there. This keeps the scholarly green
+   * identity but reaches 7.0:1, so an accent finally looks like emphasis. */
+  --academic-accent: #15654A;
+  --badge-block-bg: #E8EFE9;
+  --badge-block-text: #15654A;
+
+  --base-blue: #3F5E4D;
+  --base-blue-ink: #2C4336;
+  --base-blue-soft: #EAEAE6;
+  --base-blue-line: #D1D1CD;
+
+  --base-good: #10B981;
+  --base-good-ink: #059669;
+  --base-good-soft: #ECFDF5;
+  --base-good-line: #A7F3D0;
+
+  --base-signal: #111111;
+  --base-signal-ink: #111111;
+  --base-signal-soft: #EAEAE6;
+  --base-signal-line: #D1D1CD;
+
+  /* Mappings to framework variables */
+  --bg-base: var(--ground);
+  --bg-surface: var(--surface);
+  --bg-elevated: var(--surface-2);
+  --border: var(--line);
+  --border-2: var(--line-2);
+
+  --text-primary: var(--ink);
+  --text-secondary: var(--ink-2);
+  --text-muted: var(--ink-3);
+
+  --accent: var(--academic-accent);
+  --accent-muted: var(--badge-block-bg);
+  --accent-contrast: #FFFFFF;
+
+  /* Status. `--info` is deliberately NOT the accent: when they were the same green, a
+   * "Running" badge was indistinguishable from ordinary accented chrome, so the one
+   * status a user actively waits on read as decoration. Every value below clears WCAG AA
+   * (4.5:1) against both the page ground and the card surface. */
+  --success: #15803D;
+  --warning: #B45309;
+  --danger: #DC2626;
+  --info: #2F52C8;
+
+  /* Status surfaces — the tinted panel and hairline that go with each status hue.
+   *
+   * Defined once, and deliberately so. The rule is that no colour may have its ONLY
+   * definition inside one theme block (frontend/AGENTS.md), and a mix of two tokens that
+   * are *each* redefined under `.dark` satisfies it by construction: both operands
+   * re-resolve there, so the mix does too. Restating the same expression in `.dark` could
+   * only ever drift from this one.
+   *
+   * They exist because the run workspace was hand-assembling this tint at nine call sites
+   * as `bg-status-warning-bg` — a utility no theme ever generated, so every warning panel
+   * in the workspace rendered with no background at all. */
+  --success-soft: color-mix(in srgb, var(--success) 12%, var(--bg-surface));
+  --warning-soft: color-mix(in srgb, var(--warning) 12%, var(--bg-surface));
+  --danger-soft: color-mix(in srgb, var(--danger) 12%, var(--bg-surface));
+  --info-soft: color-mix(in srgb, var(--info) 12%, var(--bg-surface));
+  --success-line: color-mix(in srgb, var(--success) 35%, var(--border));
+  --warning-line: color-mix(in srgb, var(--warning) 35%, var(--border));
+  --danger-line: color-mix(in srgb, var(--danger) 35%, var(--border));
+  --info-line: color-mix(in srgb, var(--info) 35%, var(--border));
+
+  /* Agent identity — one hue per pipeline stage (docs/07 "Theming").
+   * Planner, Synthesizer and the human gate previously shared one green, which made two
+   * different stages of the rail look like the same stage. Hues are spread around the
+   * wheel (blue → amber → crimson → cyan → violet) so adjacent stages never collide, and
+   * the rail also numbers and positions each node, so hue reinforces meaning rather than
+   * being the sole carrier of it. */
+  --agent-planner: #2F52C8;
+  --agent-executor: #B25000;
+  --agent-critic: #BE123C;
+  --agent-synthesizer: #0E7490;
+  --agent-hitl: #6D28D9;
+
+  --ring: color-mix(in srgb, var(--accent) 40%, transparent);
+
+  /* Flat Strict Elevation (No blurry drop-shadows) */
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: 0 4px 12px -2px rgb(17 17 17 / 0.08);
+
+  /* Typography */
+  --font-serif: "Times New Roman", Times, Georgia, Cambria, serif;
+
+  /* ─── Scales (theme-independent) ─────────────────────────────────────────
+   * Declared in :root only. These carry no colour, so the light/dark
+   * duplication rule does not apply — repeating them in `.dark` would create a
+   * second home for one value, which is the drift pattern AGENTS.md warns about.
+   *
+   * Before this block, spacing came from whichever Tailwind step each component
+   * author reached for: the same "card with a title and a body" appears with
+   * p-5/p-6, p-4/py-3.5, p-3 and p-2.5 across four files, so nothing lines up
+   * across a component boundary. The primitives in components/ui consume these
+   * rather than picking a step each time.
+   */
+
+  /* Spacing — 4px base, plus the two half-steps the dense surfaces need. */
+  --space-3xs: 0.125rem; /*  2px — optical nudge between icon and text */
+  --space-2xs: 0.25rem;  /*  4px — inside a chip */
+  --space-xs: 0.5rem;    /*  8px — between siblings in a row */
+  --space-sm: 0.75rem;   /* 12px — dense list padding */
+  --space-md: 1rem;      /* 16px — default gap between controls */
+  --space-lg: 1.5rem;    /* 24px — card padding, gap between cards */
+  --space-xl: 2.5rem;    /* 40px — gap between page sections */
+  --space-2xl: 4rem;     /* 64px — page top/bottom breathing room */
+
+  /* Type — six steps, no more. The sizes that existed only as one-off arbitrary
+   * values (text-[0.6875rem], text-[0.8125rem], text-[0.625rem]) are named here,
+   * so the scale is auditable instead of being rediscovered per component. */
+  --text-micro: 0.6875rem; /* 11px — mono eyebrows, badges, timestamps */
+  --text-xs: 0.75rem;      /* 12px — hints, secondary metadata */
+  --text-sm: 0.8125rem;    /* 13px — labels, controls, dense body */
+  --text-base: 0.875rem;   /* 14px — body */
+  --text-lg: 1.125rem;     /* 18px — section headings */
+  --text-xl: 1.5rem;       /* 24px — page title */
+
+  --leading-tight: 1.25;
+  --leading-snug: 1.4;
+  --leading-relaxed: 1.65; /* reading measure — reports, descriptions */
+
+  /* Geometry. The identity is square; this states the value once rather than
+   * leaving it implied by forty separate `border-radius: 0` declarations. */
+  --radius: 0;
+
+  /* Density. `comfortable` is the default; `compact` is what the activity feed
+   * and long document lists switch to. Components read these instead of
+   * branching on a prop at every padding site. */
+  --density-pad-y: 0.625rem;
+  --density-pad-x: 0.875rem;
+  --density-row-gap: var(--space-xs);
+  /* Card padding, so the one surface every page is built out of responds too. The
+   * comfortable value is exactly what `.card` hardcoded before this. */
+  --card-pad: 1.5rem;
+}
+
+/* Opt-in compact density: set on a container, inherited by everything inside. */
+[data-density="compact"] {
+  --density-pad-y: 0.3125rem;
+  --density-pad-x: 0.5rem;
+  --density-row-gap: var(--space-2xs);
+  --card-pad: 0.875rem;
+}
+
+.dark {
+  /* 1. Core Palette & Semantic Tokens (Dark) */
+  --ink: #F4F4F6;
+  --ink-2: #8E8E93;
+  --ink-3: #707075;
+  --blue: #527A65;
+  --good: #10B981;
+  --bad: #EF4444;
+  --panel: #0E0E10;
+  --panel-line: #2E2E34;
+
+  /* 2. Surfaces & Backgrounds (Dark) */
+  --ground: #121214;
+  --surface: #1A1A1E;
+  --surface-2: #242428;
+
+  /* 3. Structural Dividers & Strict Borders (Dark) */
+  --line: #2E2E34;
+  --line-2: #3B3B42;
+
+  /* 4. Academic Accent & Badge Blocks (Dark)
+   * Brightened from #527A65 (~3.2:1 on the card, the dark-mode twin of the light theme's
+   * washed-out accent) to a mint that reaches 9.4:1 while staying short of neon. */
+  --academic-accent: #5FD3A6;
+  --badge-block-bg: #1B2E27;
+  --badge-block-text: #5FD3A6;
+
+  --base-blue: #527A65;
+  --base-blue-ink: #6B9F85;
+  --base-blue-soft: #242428;
+  --base-blue-line: #3B3B42;
+
+  --base-good: #10B981;
+  --base-good-ink: #34D399;
+  --base-good-soft: #064E3B;
+  --base-good-line: #059669;
+
+  --base-signal: #F4F4F6;
+  --base-signal-ink: #F4F4F6;
+  --base-signal-soft: #242428;
+  --base-signal-line: #3B3B42;
+
+  /* Mappings to framework variables (Dark) */
+  --bg-base: var(--ground);
+  --bg-surface: var(--surface);
+  --bg-elevated: var(--surface-2);
+  --border: var(--line);
+  --border-2: var(--line-2);
+
+  --text-primary: var(--ink);
+  --text-secondary: var(--ink-2);
+  --text-muted: var(--ink-3);
+
+  --accent: var(--academic-accent);
+  --accent-muted: var(--badge-block-bg);
+  --accent-contrast: #121214;
+
+  /* Status (dark). Same reasoning as light: `--info` is its own hue, not the accent.
+   * Lightened rather than reused from the light theme — the light values sit at ~2:1 on
+   * #121214 and would read as muddy. All clear AA on both dark surfaces. */
+  --success: #4ADE80;
+  --warning: #FBBF24;
+  --danger: #F87171;
+  --info: #8AA6FF;
+
+  /* Agent identity (dark) — same five hues, lifted for a dark ground. */
+  --agent-planner: #8AA6FF;
+  --agent-executor: #F5A742;
+  --agent-critic: #FB7185;
+  --agent-synthesizer: #43C7E8;
+  --agent-hitl: #B49BFF;
+
+  --ring: color-mix(in srgb, var(--accent) 45%, transparent);
+
+  /* Flat Strict Elevation (Dark) */
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: 0 4px 12px -2px rgb(0 0 0 / 0.5);
+
+  /* Typography */
+  --font-serif: "Times New Roman", Times, Georgia, Cambria, serif;
+}
+
+/* Map tokens into Tailwind's theme */
+@theme inline {
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-blue: var(--blue);
+  --color-good: var(--good);
+  --color-bad: var(--bad);
+  --color-panel: var(--panel);
+  --color-panel-line: var(--panel-line);
+
+  --color-ground: var(--ground);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+
+  --color-academic-accent: var(--academic-accent);
+  --color-badge-block-bg: var(--badge-block-bg);
+  --color-badge-block-text: var(--badge-block-text);
+
+  --color-base-blue: var(--base-blue);
+  --color-base-blue-ink: var(--base-blue-ink);
+  --color-base-blue-soft: var(--base-blue-soft);
+  --color-base-blue-line: var(--base-blue-line);
+
+  --color-base-good: var(--base-good);
+  --color-base-good-ink: var(--base-good-ink);
+  --color-base-good-soft: var(--base-good-soft);
+  --color-base-good-line: var(--base-good-line);
+
+  --color-base-signal: var(--base-signal);
+  --color-base-signal-ink: var(--base-signal-ink);
+  --color-base-signal-soft: var(--base-signal-soft);
+  --color-base-signal-line: var(--base-signal-line);
+
+  --color-bg-base: var(--bg-base);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-border: var(--border);
+  --color-border-2: var(--border-2);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+
+  --color-accent: var(--accent);
+  --color-accent-muted: var(--accent-muted);
+  --color-accent-contrast: var(--accent-contrast);
+
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+
+  --color-success-soft: var(--success-soft);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger-soft: var(--danger-soft);
+  --color-info-soft: var(--info-soft);
+  --color-success-line: var(--success-line);
+  --color-warning-line: var(--warning-line);
+  --color-danger-line: var(--danger-line);
+  --color-info-line: var(--info-line);
+
+  --color-agent-planner: var(--agent-planner);
+  --color-agent-executor: var(--agent-executor);
+  --color-agent-critic: var(--agent-critic);
+  --color-agent-synthesizer: var(--agent-synthesizer);
+  --color-agent-hitl: var(--agent-hitl);
+
+  --font-serif: var(--font-serif);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+/* ─── Base ────────────────────────────────────────────────────────────────── */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    border-radius: 0;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background-color: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    min-height: 100vh;
+  }
+
+  h1, h2, h3, h4, h5, h6, .academic-title {
+    font-family: var(--font-serif);
+    letter-spacing: -0.015em;
+    font-weight: 600;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--ground);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--line-2);
+    border-radius: 0;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--ink-3);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-radius: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* ─── Keyframes ───────────────────────────────────────────────────────────── */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes slide-up {
+  from {
+    transform: translateY(4px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+@keyframes pulse-ring {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ─── Component classes (token-only & strict square geometry) ─────────────── */
+@layer components {
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    font-weight: 550;
+    font-size: 0.8125rem;
+    letter-spacing: -0.005em;
+    line-height: 1.25rem;
+    padding: 0.4375rem 0.875rem;
+    border-radius: 0;
+    border: 1px solid transparent;
+    cursor: pointer;
+    white-space: nowrap;
+    transition:
+      background-color 0.12s ease,
+      border-color 0.12s ease,
+      color 0.12s ease;
+  }
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn:active:not(:disabled) {
+    transform: translateY(0.5px);
+  }
+
+  .btn-primary {
+    background-color: var(--accent);
+    /* `--accent-contrast`, not white. The dark theme's accent is a light mint
+     * (#5FD3A6), and white-on-mint measures about 1.5:1 — the app's single most
+     * prominent control was the one place the palette was ignored. The token exists
+     * precisely so the readable ink flips with the theme. */
+    color: var(--accent-contrast);
+    border-color: var(--accent);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background-color: var(--base-blue-ink);
+    border-color: var(--base-blue-ink);
+  }
+
+  .btn-secondary {
+    background-color: var(--surface);
+    color: var(--ink);
+    border-color: var(--line);
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background-color: var(--surface-2);
+    border-color: var(--line-2);
+  }
+
+  .btn-ghost {
+    background-color: transparent;
+    color: var(--ink-2);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background-color: var(--surface-2);
+    color: var(--ink);
+  }
+
+  .btn-danger {
+    background-color: transparent;
+    color: var(--bad);
+    border-color: color-mix(in srgb, var(--bad) 35%, transparent);
+  }
+  .btn-danger:hover:not(:disabled) {
+    background-color: color-mix(in srgb, var(--bad) 10%, transparent);
+    border-color: var(--bad);
+  }
+
+  .card {
+    background-color: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 0;
+    /* Density-aware. The tokens above were declared with a comment saying components
+     * read them, and nothing did — the Settings toggle wrote a preference that changed
+     * nothing anywhere. `--card-pad` keeps the comfortable value identical to the
+     * 1.5rem this was, so a user who never touches the setting sees no change. */
+    padding: var(--card-pad);
+    box-shadow: none;
+  }
+
+  .card-interactive {
+    transition:
+      border-color 0.15s ease,
+      background-color 0.15s ease;
+  }
+  .card-interactive:hover {
+    border-color: var(--ink-2);
+  }
+
+  .eyebrow {
+    font-family: var(--font-sans);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  .rule {
+    height: 1px;
+    background-color: var(--line);
+    width: 100%;
+  }
+
+  .input-base,
+  .textarea-base {
+    width: 100%;
+    background-color: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 0;
+    padding: 0.5rem 0.75rem;
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.375rem;
+    outline: none;
+    transition:
+      border-color 0.12s ease,
+      background-color 0.12s ease;
+  }
+  .input-base:hover:not(:focus):not(:disabled),
+  .textarea-base:hover:not(:focus):not(:disabled) {
+    border-color: var(--ink-2);
+  }
+  .input-base:disabled,
+  .textarea-base:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    background-color: var(--surface-2);
+  }
+  .textarea-base {
+    resize: vertical;
+    line-height: 1.6;
+  }
+  .input-base::placeholder,
+  .textarea-base::placeholder {
+    color: var(--ink-3);
+  }
+  .input-base:focus,
+  .textarea-base:focus {
+    border-color: var(--accent);
+    outline: 1px solid var(--accent);
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.125rem 0.5rem;
+    border-radius: 0;
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.2;
+    border: 1px solid transparent;
+  }
+
+  /* Academic Technical Badge Frame (e.g. NODE::INGESTION) */
+  .badge-frame {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.125rem 0.4375rem;
+    background-color: var(--badge-block-bg);
+    color: var(--badge-block-text);
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    border-radius: 0;
+    border: 1px solid color-mix(in srgb, var(--badge-block-text) 25%, transparent);
+  }
+
+  /* Square Status Dot (8px by 8px) */
+  .status-marker {
+    width: 8px;
+    height: 8px;
+    border-radius: 0;
+    flex-shrink: 0;
+    display: inline-block;
+  }
+
+  /* Tight 1px Line-Grid Layout */
+  .academic-grid {
+    display: grid;
+    gap: 1px;
+    background-color: var(--line);
+    border: 1px solid var(--line);
+  }
+  .academic-grid > * {
+    background-color: var(--surface);
+    border-radius: 0;
+  }
+
+  /* Semantic Tint / Soft Sets */
+  .chip-blue {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.125rem 0.4375rem;
+    border-radius: 0;
+    font-size: 0.75rem;
+    font-weight: 550;
+    line-height: 1;
+    color: var(--base-blue-ink);
+    background-color: var(--base-blue-soft);
+    border: 1px solid var(--base-blue-line);
+  }
+
+  .chip-good {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.125rem 0.4375rem;
+    border-radius: 0;
+    font-size: 0.75rem;
+    font-weight: 550;
+    line-height: 1;
+    color: var(--base-good-ink);
+    background-color: var(--base-good-soft);
+    border: 1px solid var(--base-good-line);
+  }
+
+  .chip-signal {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.125rem 0.4375rem;
+    border-radius: 0;
+    font-size: 0.75rem;
+    font-weight: 550;
+    line-height: 1;
+    color: var(--base-signal-ink);
+    background-color: var(--base-signal-soft);
+    border: 1px solid var(--base-signal-line);
+  }
+
+  .menu-surface {
+    background-color: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 0;
+    box-shadow: var(--shadow-lg);
+    padding: 0.25rem;
+  }
+
+  .menu-item {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 0.625rem;
+    border-radius: 0;
+    padding: 0.4375rem 0.625rem;
+    font-size: 0.8125rem;
+    color: var(--ink-2);
+    text-align: left;
+    cursor: pointer;
+    transition:
+      background-color 0.12s ease,
+      color 0.12s ease;
+  }
+  .menu-item:hover,
+  .menu-item:focus-visible {
+    background-color: var(--surface-2);
+    color: var(--ink);
+  }
+  .menu-item[data-danger="true"]:hover {
+    color: var(--bad);
+    background-color: color-mix(in srgb, var(--bad) 10%, transparent);
+  }
+
+  .menu-separator {
+    height: 1px;
+    margin: 0.25rem 0;
+    background-color: var(--line);
+  }
+
+  .segmented {
+    display: inline-flex;
+    gap: 1px;
+    padding: 1px;
+    border-radius: 0;
+    background-color: var(--line);
+    border: 1px solid var(--line);
+  }
+  .segmented-item {
+    border-radius: 0;
+    padding: 0.3125rem 0.625rem;
+    font-size: 0.75rem;
+    font-weight: 550;
+    background-color: var(--surface);
+    color: var(--ink-2);
+    cursor: pointer;
+    transition:
+      background-color 0.12s ease,
+      color 0.12s ease;
+  }
+  .segmented-item:hover {
+    color: var(--ink);
+  }
+  .segmented-item[aria-current="page"],
+  .segmented-item[aria-selected="true"],
+  .segmented-item[aria-checked="true"] {
+    background-color: var(--accent);
+    color: var(--accent-contrast);
+  }
+
+  .spinner {
+    width: 0.875rem;
+    height: 0.875rem;
+    border: 2px solid color-mix(in srgb, currentColor 30%, transparent);
+    border-top-color: currentColor;
+    border-radius: 0;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+
+  .animate-fade-in {
+    animation: fade-in 0.15s ease-out;
+  }
+  .animate-slide-up {
+    animation: slide-up 0.15s ease-out;
+  }
+}
+
+/* ─── Academic Booktabs Data Table ────────────────────────────────────────── */
+.academic-table {
+  width: 100%;
+  border-collapse: collapse;
+  border-top: 2px solid var(--line);
+  border-bottom: 2px solid var(--line);
+  border-left: none;
+  border-right: none;
+}
+.academic-table th {
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  border-bottom: 1px solid var(--line);
+  padding: 0.5rem 0.75rem;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-2);
+  text-align: left;
+}
+.academic-table td {
+  border-left: none;
+  border-right: none;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--ink);
+  border-bottom: none;
+}
+.academic-table tr + tr td {
+  border-top: 1px solid color-mix(in srgb, var(--line) 40%, transparent);
+}
+.academic-table .col-mono,
+.academic-table .col-metric,
+.academic-table .col-time {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Report/Chat Prose (Editorial Academic Style) ────────────────────────── */
+.prose {
+  --tw-prose-body: var(--ink);
+  --tw-prose-headings: var(--ink);
+  --tw-prose-links: var(--accent);
+  --tw-prose-bold: var(--ink);
+  --tw-prose-counters: var(--ink-2);
+  --tw-prose-bullets: var(--line);
+  --tw-prose-hr: var(--line);
+  --tw-prose-quotes: var(--ink-2);
+  --tw-prose-quote-borders: var(--line);
+  --tw-prose-code: var(--ink);
+  --tw-prose-pre-bg: var(--panel);
+  --tw-prose-pre-code: #F4F4F6;
+  --tw-prose-th-borders: var(--line);
+  --tw-prose-td-borders: var(--line);
+}
+
+.prose h1, .prose h2, .prose h3, .prose h4 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  border-top: 2px solid var(--line);
+  border-bottom: 2px solid var(--line);
+  border-left: none;
+  border-right: none;
+}
+
+.prose thead th {
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-2);
+}
+
+.prose tbody tr {
+  border-left: none;
+  border-right: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 40%, transparent);
+}
+
+.prose tbody tr:last-child {
+  border-bottom: none;
+}
+
+.prose tbody td {
+  border-left: none;
+  border-right: none;
+}

@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""
+Stamp the build with the revision that produced it.
+
+Writes `backend/research_engine/_build.py`, which `research_engine.build_info` reads and
+`GET /version` serves. Git-ignored on purpose: a source checkout has no stamp, and
+`build_info()` answers `unknown` rather than guessing from the working tree — a guess is
+wrong exactly when it matters, which is a bundle built from a dirty tree or copied
+between machines.
+
+Run before packaging, on both hosts:
+
+    python scripts/stamp_build.py
+
+`--check` verifies an existing stamp still describes this checkout — version, commit, and
+whether the tree is dirty — without importing the app. `research-sidecar.spec` runs it before
+bundling a stamp, because a hand-run build would otherwise ship a leftover one.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+STAMP = ROOT / "backend" / "research_engine" / "_build.py"
+
+
+def contract_version() -> str:
+    """A hash of the canonical API surface: every operation and its response shape.
+
+    Not the whole OpenAPI document — descriptions and summaries change with prose, and a
+    contract hash that moves when someone improves a docstring is a hash nobody will trust.
+    """
+    # Placeholder configuration, set only to build the app object for introspection.
+    # `app.config` requires a DSN and a signing key at import, and this script also runs on
+    # the desktop build, which has neither. Nothing here connects to anything: the OpenAPI
+    # document is assembled from route declarations. `setdefault`, so a configured
+    # environment keeps its own values.
+    import os  # noqa: PLC0415
+
+    os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://stamp:stamp@localhost/stamp")
+    os.environ.setdefault("JWT_SECRET_KEY", "stamp-" + "0" * 32)
+
+    sys.path.insert(0, str(ROOT / "backend"))
+    from app.main import app  # noqa: PLC0415
+
+    surface = {}
+    for path, item in app.openapi()["paths"].items():
+        for method, operation in item.items():
+            if method not in ("get", "post", "put", "patch", "delete"):
+                continue
+            responses = {
+                code: (resp.get("content") or {}).get("application/json", {}).get("schema")
+                for code, resp in (operation.get("responses") or {}).items()
+            }
+            surface[f"{method.upper()} {path}"] = responses
+    canonical = json.dumps(surface, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _build_info():
+    """`research_engine.build_info`: the one home for what a stamp claims about its checkout
+    and when the checkout contradicts it — `build_info()` asks the same question at runtime.
+    It imports nothing from the app."""
+    sys.path.insert(0, str(ROOT / "backend"))
+    from research_engine import build_info  # noqa: PLC0415
+
+    return build_info
+
+
+def identity() -> dict:
+    """What a stamp claims about the checkout, and all `--check` compares."""
+    found = _build_info().checkout_identity(ROOT)
+    if found is None:
+        raise SystemExit(f"cannot read the git checkout at {ROOT}; a stamp names its commit")
+    return found
+
+
+def stamp() -> dict:
+    return {
+        **identity(),
+        "CONTRACT_VERSION": contract_version(),
+        "BUILT_AT": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="verify an existing stamp")
+    args = parser.parse_args()
+
+    if args.check:
+        current = identity()
+        if not STAMP.exists():
+            print("no build stamp — run scripts/stamp_build.py before packaging", file=sys.stderr)
+            return 1
+        # Parsed, not string-matched. The first version of this compared against its own
+        # output format and disagreed with a stamp it had just written, because `repr`
+        # renders single quotes — a check that fails on formatting tells you nothing about
+        # the thing it is supposed to be checking.
+        import ast  # noqa: PLC0415
+
+        recorded = {}
+        for node in ast.parse(STAMP.read_text(encoding="utf-8")).body:
+            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+                recorded[node.targets[0].id] = ast.literal_eval(node.value)
+
+        # DIRTY included: a stamp of a clean HEAD over uncommitted changes would let the
+        # bundle claim to be exactly that commit.
+        problem = _build_info().stamp_contradiction(recorded, current)
+        if problem:
+            print(problem, file=sys.stderr)
+            return 1
+        print(f"build stamp matches this checkout ({current['GIT_SHA'][:9]})")
+        return 0
+
+    current = stamp()
+    lines = [
+        '"""Generated by scripts/stamp_build.py. Not checked in; see build_info.py."""',
+        "",
+    ]
+    for key, value in current.items():
+        lines.append(f"{key} = {value!r}")
+    STAMP.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"stamped {current['GIT_SHA'][:9]}{' (dirty)' if current['DIRTY'] else ''}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

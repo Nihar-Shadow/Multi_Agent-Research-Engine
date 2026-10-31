@@ -1,0 +1,378 @@
+import { cookies } from "next/headers";
+import Link from "next/link";
+import { redirect } from "next/navigation";
+
+import { JsonLd } from "@/components/site/JsonLd";
+import { isDesktop } from "@/lib/desktop";
+import { FEATURES, isNew } from "@/lib/features";
+import { absoluteUrl, isPagesBuild, pageUrls } from "@/lib/pages-build";
+import { REPOSITORY_URL, latestRelease, releaseAnchor } from "@/lib/releases";
+
+/**
+ * Landing page and app entry point (docs/07 "Components").
+ *
+ * The redirect logic is unchanged from when this file did nothing else: a session cookie
+ * still means "go straight into the app", server-side so there is no unauthenticated
+ * flash of app chrome, and the desktop build still skips all of it because it has no login
+ * (docs/13 §7) — `isDesktop` is inlined, so the cookie read compiles out of the static
+ * export exactly as before. What changed is only what a *logged-out web visitor* gets:
+ * previously a login form, now the page that explains what they would be logging into.
+ *
+ * Ordering matters. The pitch below leads with verifiability rather than with the agent
+ * pipeline, because the pipeline is how it works and verifiability is why anyone would
+ * switch (docs/01 §0).
+ */
+
+// No `title` here: it is identical to the root layout's `title.default`
+// (app/layout.tsx), and setting it here would additionally run it through that layout's
+// `template`, doubling "· Research Assistant" onto the one string that already carries the
+// brand name up front. `default` is exactly the value used when a segment sets none.
+export const metadata = {
+  description:
+    "A self-hostable multi-agent research assistant. Every citation resolves to a source " +
+    "and a verbatim snippet, and the export can be verified offline with no AI and no network.",
+  ...pageUrls("/"),
+};
+
+/**
+ * `SoftwareApplication` structured data for the landing page — the machine-readable version
+ * of the same pitch, so a search engine (or an assistant reading the page on someone's
+ * behalf) can pick up the name, license and price without parsing prose. Pages-only: see
+ * `pageUrls`/`absoluteUrl` in `lib/pages-build.ts` for why a self-hosted deployment or the
+ * desktop build must not stamp this project's Pages URL into their own metadata.
+ */
+function landingSchema() {
+  return {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: "Multi-Agent Research Assistant",
+    description:
+      "A self-hostable, bring-your-own-key multi-agent research assistant. Plans, gathers " +
+      "cited evidence, critiques it, and drafts a report where every citation resolves to " +
+      "a source and a verbatim snippet — exportable to a bundle a third party can verify " +
+      "offline, with no AI and no network.",
+    url: absoluteUrl("/"),
+    downloadUrl: absoluteUrl("/download"),
+    codeRepository: REPOSITORY_URL,
+    applicationCategory: "ProductivityApplication",
+    operatingSystem: "Windows, macOS, Linux, Web",
+    softwareVersion: latestRelease()?.version,
+    license: "https://opensource.org/licenses/MIT",
+    offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+    author: { "@type": "Person", name: "Aditya Mhaske" },
+  };
+}
+
+const OPEN_SOURCE = [
+  {
+    term: "Licence",
+    detail:
+      "MIT. Use it, fork it, run it commercially — no per-seat cost and no lock-in.",
+  },
+  {
+    term: "Your keys, your data",
+    detail:
+      "Bring your own API key, or run entirely on local models. Nothing is proxied through a service we operate, because there isn't one.",
+  },
+  {
+    term: "Auditable claims",
+    detail:
+      "The measurements this project publishes are backed by committed evaluation results, and the harness refuses to print a number it did not measure.",
+  },
+] as const;
+
+const CLAIMS = [
+  {
+    title: "Every citation is falsifiable",
+    body: "Each [n] resolves to a real source and the verbatim sentence that supports it. One that cannot be verified renders a ⚠ chip instead of rendering clean.",
+  },
+  {
+    title: "You approve the plan before it spends",
+    body: "The run pauses after the planner and shows the research areas it chose. Drop what you did not ask for and it is never researched — all before a single search costs anything.",
+  },
+  {
+    title: "Your corpus never has to leave",
+    body: "Corpus-only mode takes evidence only from your documents, with web search off and indexing on a local model. The research models still see your question and excerpts, so choose local models too and an unpublished manuscript stays on your machine.",
+  },
+] as const;
+
+// Typed rather than `as const`: the latter narrows each entry to its own literal shape, so
+// `step.gate` is a type error on the four steps that omit it.
+const PIPELINE: { name: string; note: string; gate?: boolean }[] = [
+  { name: "Planner", note: "decomposes the question" },
+  { name: "Design gate", note: "you choose what gets researched", gate: true },
+  { name: "Executor ⇄ Critic", note: "gathers and grades evidence" },
+  { name: "Synthesizer", note: "writes the cited draft" },
+  { name: "Review gate", note: "you approve the draft", gate: true },
+  { name: "Artifact", note: "frozen when you approve, verifiable offline" },
+];
+
+export default async function Home() {
+  // The Pages build has no server, no session and no app to redirect into — it is the
+  // public site and nothing else, so it renders the landing page unconditionally. Checked
+  // first because `cookies()` cannot be called from a statically exported route at all;
+  // this is not an optimisation, it is what makes the export possible.
+  if (!isPagesBuild) {
+    // /research is the product's entry point: a question, and the run it becomes.
+    if (!isDesktop) {
+      const store = await cookies();
+      if (store.has("access_token")) redirect("/research");
+    } else {
+      redirect("/research");
+    }
+  }
+
+  const latest = latestRelease();
+
+  return (
+    <>
+      {isPagesBuild && <JsonLd data={landingSchema()} />}
+      <main className="mx-auto w-full max-w-5xl px-4 py-16 sm:px-6">
+        <section className="max-w-3xl">
+          <p className="font-mono text-[0.6875rem] uppercase tracking-widest text-text-muted">
+            Self-hostable · bring your own key · runs on local models
+          </p>
+          {/* The project's actual name, said once and plainly. The tagline below is the
+              pitch; a visitor arriving from a link still needs to know what this is called. */}
+          <h1 className="mt-4 font-serif text-4xl font-bold leading-tight tracking-tight text-text-primary sm:text-5xl">
+            Multi-Agent Research Assistant
+          </h1>
+          <p className="mt-3 font-serif text-2xl leading-snug text-text-secondary sm:text-3xl">
+            Cited research you can actually verify.
+          </p>
+          <p className="mt-5 text-base leading-relaxed text-text-secondary">
+            A multi-agent pipeline that searches, gathers evidence, and writes a
+            cited report — then pauses for you twice, and exports something a
+            third party can check{" "}
+            <strong className="font-semibold text-text-primary">
+              offline, with no AI and no network
+            </strong>
+            .
+          </p>
+
+          <div className="mt-8 flex flex-wrap items-center gap-3">
+            {isPagesBuild ? (
+              // No /login in the static export — the primary action on the public site is
+              // to get the app, not to sign in to a server that is not there.
+              <Link
+                href="/download"
+                className="flex h-10 items-center border border-accent bg-accent px-4 font-mono text-xs font-medium text-accent-contrast transition-opacity hover:opacity-90"
+              >
+                Get the desktop app →
+              </Link>
+            ) : (
+              <Link
+                href="/login"
+                className="flex h-10 items-center border border-accent bg-accent px-4 font-mono text-xs font-medium text-accent-contrast transition-opacity hover:opacity-90"
+              >
+                Start researching →
+              </Link>
+            )}
+            <Link
+              href="/why"
+              className="flex h-10 items-center border border-border bg-bg-surface px-4 font-mono text-xs text-text-secondary transition-colors hover:bg-bg-elevated hover:text-text-primary"
+            >
+              Why not NotebookLM?
+            </Link>
+            {!isPagesBuild && (
+              <Link
+                href="/download"
+                className="flex h-10 items-center px-2 font-mono text-xs text-text-muted transition-colors hover:text-text-primary"
+              >
+                Download the desktop app
+              </Link>
+            )}
+          </div>
+
+          {/* The newest release's own headline, read from `lib/releases.ts` rather than
+              written here, so this line moves with each tag and cannot outlive it. */}
+          {latest && (
+            <p className="mt-8 border-l-2 border-accent pl-3 text-sm leading-relaxed text-text-secondary">
+              <span className="mr-2 font-mono text-[0.6875rem] uppercase tracking-widest text-accent">
+                New in {latest.version}
+              </span>
+              {latest.headline}{" "}
+              <Link
+                href={`/releases#${releaseAnchor(latest.version)}`}
+                className="whitespace-nowrap font-mono text-xs text-accent transition-opacity hover:opacity-80"
+              >
+                What changed →
+              </Link>
+            </p>
+          )}
+        </section>
+
+        <section aria-labelledby="claims-heading" className="mt-16">
+          <h2 id="claims-heading" className="sr-only">
+            What this does that others do not
+          </h2>
+          <div className="grid gap-4 sm:grid-cols-3">
+            {CLAIMS.map((claim) => (
+              <div
+                key={claim.title}
+                className="border border-border bg-bg-surface p-5"
+              >
+                <h3 className="font-serif text-base font-bold text-text-primary">
+                  {claim.title}
+                </h3>
+                <p className="mt-2 text-sm leading-relaxed text-text-secondary">
+                  {claim.body}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section aria-labelledby="features-heading" className="mt-16">
+          <h2
+            id="features-heading"
+            className="font-serif text-2xl font-bold tracking-tight text-text-primary"
+          >
+            What it does
+          </h2>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-text-secondary">
+            Everything here ships in {latest ? latest.version : "the current release"}.
+            Where a feature has a limit that decides whether it applies to you, its
+            description says so.
+          </p>
+          {/* Ruled rather than boxed: the three claims above are the argument, and this is
+              the inventory — a second wall of cards would give both the same voice. */}
+          <ul className="mt-6 grid gap-x-10 gap-y-8 sm:grid-cols-2 lg:grid-cols-3">
+            {FEATURES.map((feature) => (
+              <li key={feature.title} className="flex flex-col border-t border-border pt-4">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <h3 className="font-serif text-base font-bold text-text-primary">
+                    {feature.title}
+                  </h3>
+                  {isNew(feature) && (
+                    <span className="border border-accent px-1.5 py-0.5 font-mono text-[0.625rem] uppercase tracking-widest text-accent">
+                      New in {feature.since}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-2 flex-1 text-sm leading-relaxed text-text-secondary">
+                  {feature.body}
+                </p>
+                <Link
+                  href={feature.href}
+                  className="mt-3 inline-flex font-mono text-xs text-accent transition-opacity hover:opacity-80"
+                >
+                  Read more →
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <section aria-labelledby="pipeline-heading" className="mt-16">
+          <h2
+            id="pipeline-heading"
+            className="font-serif text-2xl font-bold tracking-tight text-text-primary"
+          >
+            Two human gates, not zero
+          </h2>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-text-secondary">
+            Both are durable checkpoints, not polling loops: state is written to
+            disk and the worker exits, so resuming continues rather than
+            re-running research you already paid for.
+          </p>
+          <ol className="mt-6 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {PIPELINE.map((step, i) => (
+              <li
+                key={step.name}
+                className={`flex items-baseline gap-3 border p-3 ${
+                  step.gate
+                    ? "border-accent bg-bg-elevated"
+                    : "border-border bg-bg-surface"
+                }`}
+              >
+                <span className="font-mono text-[0.6875rem] text-text-muted">
+                  {String(i + 1).padStart(2, "0")}
+                </span>
+                <span className="min-w-0">
+                  <span className="block font-mono text-xs font-medium text-text-primary">
+                    {step.gate ? `⏸ ${step.name}` : step.name}
+                  </span>
+                  <span className="block text-xs text-text-muted">
+                    {step.note}
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        <section className="mt-16 border border-border bg-bg-surface p-6">
+          <h2 className="font-serif text-xl font-bold tracking-tight text-text-primary">
+            The part nobody else has
+          </h2>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-text-secondary">
+            Every report exports as a{" "}
+            <code className="font-mono text-xs">.bundle.json</code> carrying its
+            evidence, its sources, the models actually dialled, the instructions each
+            agent ran with, and the approval chain — hashed so that editing the report
+            after a human approved it breaks the chain. A standalone verifier checks the whole thing with no
+            AI, no network, and no account. Your reviewer does not have to trust
+            this tool, or us.
+          </p>
+          <Link
+            href="/why"
+            className="mt-4 inline-flex font-mono text-xs text-accent transition-opacity hover:opacity-80"
+          >
+            See how it compares →
+          </Link>
+        </section>
+
+        <section aria-labelledby="oss-heading" className="mt-16">
+          <h2
+            id="oss-heading"
+            className="font-serif text-2xl font-bold tracking-tight text-text-primary"
+          >
+            Open source, and inspectable
+          </h2>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-text-secondary">
+            MIT licensed. The verification claims on this site are the kind that
+            are worth nothing unless you can check them, so the source, the tests
+            that hold them up, and the documentation are all public and all built
+            from the same repository as this page.
+          </p>
+          <dl className="mt-6 grid gap-4 sm:grid-cols-3">
+            {OPEN_SOURCE.map((item) => (
+              <div
+                key={item.term}
+                className="border border-border bg-bg-surface p-4"
+              >
+                <dt className="font-mono text-[0.6875rem] uppercase tracking-widest text-text-muted">
+                  {item.term}
+                </dt>
+                <dd className="mt-1.5 text-sm leading-relaxed text-text-secondary">
+                  {item.detail}
+                </dd>
+              </div>
+            ))}
+          </dl>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <Link
+              href="/source"
+              className="flex h-9 items-center border border-border bg-bg-surface px-3 font-mono text-xs text-text-secondary transition-colors hover:bg-bg-elevated hover:text-text-primary"
+            >
+              Source &amp; architecture →
+            </Link>
+            <Link
+              href="/license"
+              className="flex h-9 items-center border border-border bg-bg-surface px-3 font-mono text-xs text-text-secondary transition-colors hover:bg-bg-elevated hover:text-text-primary"
+            >
+              MIT licence →
+            </Link>
+            <Link
+              href="/releases"
+              className="flex h-9 items-center border border-border bg-bg-surface px-3 font-mono text-xs text-text-secondary transition-colors hover:bg-bg-elevated hover:text-text-primary"
+            >
+              Release history →
+            </Link>
+          </div>
+        </section>
+      </main>
+    </>
+  );
+}

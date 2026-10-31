@@ -1,0 +1,96 @@
+# Node & Frontend
+node_modules/
+.next/
+out/
+build/
+dist/
+.turbo/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+
+# Python packaging & build artifacts
+*.egg-info/
+backend/research_engine/build/
+backend/build/
+backend/dist/
+
+# Rust / Cargo / Desktop
+target/
+desktop/target/
+desktop/gen/schemas/
+
+# Testing & E2E artifacts
+playwright-report/
+test-results/
+blob-report/
+.playwright/
+.uiqa/
+
+# Env & Secrets
+.env
+.env.*
+!.env.example
+
+# IDEs, OS, and Editors
+.vscode/
+.idea/
+.DS_Store
+._*
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Logs & Databases
+logs/
+*.log
+data/
+*.sqlite
+*.sqlite-*
+# The one exception: a real v2.1.0 install's databases, kept as the upgrade fixture
+# (scripts/make_upgrade_fixture.py). Every other SQLite file is a runtime artifact.
+!backend/tests/fixtures/upgrade/*/*.sqlite
+# Redis snapshot, written into the working directory by a locally started redis-server.
+*.rdb
+
+
+# Per-developer coding-agent state. Plans are working notes, not a build contract, and a
+# completed one left in the tree reads as a description of the product; the shipped design
+# belongs in `docs/`, which is where the code cites it from.
+.claude/settings.local.json
+.claude/plans/
+
+# Scratch space for positioning notes, drafts, and ideas that are not yet decisions.
+future-plans/
+scratch/
+audit_run_result.json
+
+# Editor/agent tool directories. Per-tool config, not project code.
+.qoder/
+.codex/
+.gemini/
+
+
+# Personal presentation/interview notes. Kept beside the code so it is easy to open during a
+# walkthrough, but it is a personal artifact rather than project documentation — the shipped
+# explanation of how this works is README.md and docs/, and a second one in the tree would
+# drift from them silently.
+/PRESENTATION.md
+backend/research_engine/_build.py
